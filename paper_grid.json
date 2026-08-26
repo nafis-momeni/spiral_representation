@@ -1,0 +1,30 @@
+{
+  "_comment": "The runs behind the paper's intervention figures. Three parameterisations of scale(position) on the same data, each with the identity embedding learned and frozen; 4 seeds each = 24 runs. Expanded and executed by `python -m intervention.reproduce`. grid_config.json is the scratch grid for exploration; this one is fixed.",
+
+  "model_name": ["Ua_LSTM_h128_l1_v42_d0.0_t0.0_s1"],
+  "weights_path": ["resources/weights/1024_75.pth"],
+
+  "dataset": ["source-modified"],
+  "model": ["onion", "spiral_rope", "low_rank-8"],
+  "state_mode": ["concat"],
+  "embedding_init": ["delta_state_mean"],
+  "train_embedding": [true, false],
+  "seeds": [42, 43, 44, 45],
+
+  "edit_ngram": [1],
+  "edit_sampler": ["uniform"],
+  "check_repeat": [true],
+  "check_cv_pattern": [false],
+  "check_n_gram": [0],
+  "train_all_pos": [false],
+  "teacher_forcing": [false],
+
+  "learning_rate": [0.001],
+  "batch_size": [32],
+  "hidden_size": [128],
+  "num_epochs": [200],
+  "patience": [7],
+  "min_delta": [0.00001],
+  "max_seq_len": [20],
+  "val_ratio": [0.05]
+}

@@ -4,7 +4,7 @@
 either the scale or the DAS intervention, then shares the same data, trainer, and I/O.
 It writes ``config.json``, ``history.csv``, ``predictions.csv`` and ``params.npz``
 (the interpretable parameters used for CI/bar plots); the trained weights are only saved
-when ``save_model=True``. Plotting is a separate step (see ``analysis_plots``).
+when ``save_model=True``. Plotting is a separate step (see ``intervention.plotting.plots``).
 """
 from __future__ import annotations
 

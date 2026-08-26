@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from ast import literal_eval
 from pathlib import Path
 
@@ -52,12 +53,18 @@ def _cache_path(cache_dir: Path | None, dataset: str, split: str, key_fields: di
     return Path(cache_dir) / f"{name}.pt"
 
 
-def _load_or_build(cache_path: Path | None, build_fn, verbose: bool):
+def _load_or_build(cache_path: Path | None, build_fn, verbose: bool, desc: str = "split"):
     if cache_path is not None and cache_path.exists():
         if verbose:
             print(f"  [cache] load {cache_path.name}")
         return torch.load(cache_path, weights_only=False)
+    # A cache miss means minutes of work: announce it (not just under --verbose) so the
+    # run never looks hung, and report what came out of it.
+    print(f"  [data] building {desc}...", flush=True)
+    start = time.perf_counter()
     examples = build_fn()
+    print(f"  [data] built {desc}: {len(examples)} examples in "
+          f"{time.perf_counter() - start:.1f}s", flush=True)
     if cache_path is not None:
         # Write-then-rename so parallel workers can't read a half-written cache file.
         cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,7 +191,8 @@ def build_loaders(
                 vocab_size=len(phoneme_to_id), edit_sampler=data_cfg.edit_sampler,
             )
 
-        examples = _load_or_build(cache_path, build_fn, verbose)
+        examples = _load_or_build(cache_path, build_fn, verbose,
+                                  desc=f"{data_cfg.dataset} {split} (seed {seed})")
         dataset: Dataset = PairDataset(examples, pad_id, eos_id, data_cfg.max_seq_len)
         loaders[split] = DataLoader(dataset, batch_size=batch_size, shuffle=(split == "train"))
         if verbose:

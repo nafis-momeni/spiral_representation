@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 build/
 dist/
-*.egg-info/
+*.egg-info
 .venv/
 venv/
 
@@ -12,17 +12,12 @@ venv/
 .vscode/
 .ipynb_checkpoints/
 
-# Pipeline outputs and scratch (all regenerable)
+# Pipeline outputs
 /cache/
 /results/
-/outputs/
 /plots/
 /datasets/
 /states_ds/
-/junk/
-/test/
-/paper/
 
-# Large regenerable n-gram state tables (~41 MB). Rebuild with
-# `python -m intervention.data.delta_embeddings`; needs states_ds/.
-resources/embeddings/ngram*_state_embeddings.npz
+
+resources/embeddings/

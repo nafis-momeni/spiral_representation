@@ -43,7 +43,46 @@ class StateExtractor:
         input_ids = self._to_input_ids(phonemes)
         h,c = self._get_final_hidden(input_ids)
         return h, c
-    
+
+    @torch.no_grad()
+    def extract_batch(
+        self, sequences: list[list[str]], batch_size: int = 512
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """``extract_sequential`` for many sequences at once, unrolled instead of re-fed.
+
+        An LSTM started from a zero state reaches the same (h, c) after ``k`` steps
+        whether the prefix is re-encoded from scratch or the state is carried, so this
+        returns exactly what ``extract_sequential`` does — but in O(L) steps per sequence
+        over a padded batch rather than O(L^2) one word at a time, which is the difference
+        between seconds and minutes over the 30k-word lexicon.
+        """
+        pad_id = self.phoneme_to_id["<PAD>"]
+        encoder = self.model.encoder
+        out: list[tuple[np.ndarray, np.ndarray]] = []
+
+        for start in range(0, len(sequences), batch_size):
+            batch = sequences[start : start + batch_size]
+            lengths = [len(s) for s in batch]
+            width = max(lengths)
+
+            ids = torch.full((len(batch), width), pad_id, dtype=torch.long, device=self.device)
+            for i, seq in enumerate(batch):
+                ids[i, : len(seq)] = torch.tensor(
+                    [self.phoneme_to_id[p] for p in seq], dtype=torch.long, device=self.device
+                )
+
+            embedded = encoder.embedding(ids)
+            state, hs, cs = None, [], []
+            for t in range(width):
+                _, state = encoder.recurrent(embedded[:, t : t + 1], state)
+                hs.append(state[0][-1])
+                cs.append(state[1][-1])
+            h = torch.stack(hs, dim=1).cpu().numpy()   # (B, width, hidden)
+            c = torch.stack(cs, dim=1).cpu().numpy()
+            out.extend((h[i, :n], c[i, :n]) for i, n in enumerate(lengths))
+        return out
+
+
 @dataclass
 class StatesDataset:
     """Stores extracted states for an entire dataset.
@@ -74,48 +113,40 @@ class StatesDataset:
         phoneme_col: str = "No_Stress",
         word_col: str = "Word",
         append_eos: bool = True,
+        batch_size: int = 512,
     ) -> "StatesDataset":
-        """build dataset from DataFrame with phoneme sequences and conditions."""
-        all_meta_rows = []
-        all_h, all_c = [], []
-        all_delta_h, all_delta_c = [], []
+        """Build a dataset from a frame of phoneme sequences.
 
-        for seq_id, row in df.iterrows():
-            phonemes = list(row[phoneme_col])
-            if append_eos:
-                phonemes = phonemes + ["<EOS>"]
-            
-            # extract sequential states (shape_len, hidden_size)
-            h_seq, c_seq = extractor.extract_sequential(phonemes)
+        ``state``/``delta_state`` are filled in as ``[h, c]`` concatenated, so a caller
+        never has to remember to stitch them together. ``delta[0]`` is the state itself,
+        not a difference — position 0 has no predecessor (analyses drop it for that
+        reason; see ``state_analysis.surprisal``).
+        """
+        sequences = [
+            list(row[phoneme_col]) + (["<EOS>"] if append_eos else [])
+            for _, row in df.iterrows()
+        ]
+        per_word = extractor.extract_batch(sequences, batch_size=batch_size)
 
-            # deltas, dh[0] = 0
-            dh = np.diff(h_seq, axis=0, prepend=h_seq[0:1])
-            dc = np.diff(c_seq, axis=0, prepend=c_seq[0:1])
-            # dh[0] = h[0]
-            dh[0] = h_seq[0]
-            dc[0] = c_seq[0]
+        meta_rows = [
+            {"seq_id": seq_id, "word": word, "position": pos, "phoneme": phoneme}
+            for seq_id, word, phonemes in zip(df.index, df[word_col], sequences)
+            for pos, phoneme in enumerate(phonemes)
+        ]
 
-            for pos, phoneme in enumerate(phonemes):
-                all_meta_rows.append({
-                    "seq_id": seq_id,
-                    "word": row[word_col],
-                    "position": pos,
-                    "phoneme": phoneme,
-                })
-            
-            all_h.append(h_seq)
-            all_c.append(c_seq)
-            all_delta_h.append(dh)
-            all_delta_c.append(dc)
+        def with_deltas(seqs: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+            deltas = [np.diff(s, axis=0, prepend=s[0:1]) for s in seqs]
+            for delta, s in zip(deltas, seqs):
+                delta[0] = s[0]
+            return np.concatenate(seqs), np.concatenate(deltas)
 
-        metadata = pd.DataFrame(all_meta_rows).reset_index(drop=True)
+        h, delta_h = with_deltas([h for h, _ in per_word])
+        c, delta_c = with_deltas([c for _, c in per_word])
         return StatesDataset(
-            metadata=metadata,
-            h=np.concatenate(all_h, axis=0),
-            c=np.concatenate(all_c, axis=0),
-            delta_h=np.concatenate(all_delta_h, axis=0),
-            delta_c=np.concatenate(all_delta_c, axis=0),
-            # state = np.concatenate([h, c], axis=1)
+            metadata=pd.DataFrame(meta_rows).reset_index(drop=True),
+            h=h, c=c, delta_h=delta_h, delta_c=delta_c,
+            state=np.concatenate([h, c], axis=1),
+            delta_state=np.concatenate([delta_h, delta_c], axis=1),
         )
     
     def __len__(self):

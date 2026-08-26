@@ -20,6 +20,8 @@ index the n-gram vocabulary from :func:`build_ngram_vocab` instead of the phonem
 """
 from __future__ import annotations
 
+import sys
+import time
 from ast import literal_eval
 from collections import defaultdict
 
@@ -31,6 +33,33 @@ from intervention.data.markov import sample_sequence
 from intervention.models.repeat_model_utils import can_repeat
 
 SPECIAL_PHONEMES = ("<PAD>", "<EOS>", "<SOS>")
+
+
+# --------------------------------------------------------------------------- #
+# Progress reporting
+# --------------------------------------------------------------------------- #
+def progress(items, label: str, every: float = 5.0):
+    """Iterate ``items``, printing a progress line at most every ``every`` seconds.
+
+    Building a split takes minutes (every candidate source is run through the frozen
+    repeat model), so an otherwise silent terminal reads as a hang.
+    """
+    items = list(items)
+    total = len(items)
+    if not total:
+        return
+    tty = sys.stdout.isatty()
+    start = last = time.perf_counter()
+    for i, item in enumerate(items, start=1):
+        yield item
+        now = time.perf_counter()
+        if now - last >= every or i == total:
+            last = now
+            line = f"  [data] {label}: {i}/{total} ({100 * i / total:.0f}%), {now - start:.0f}s"
+            # Overwrite one line on a terminal; append plain lines when piped to a log.
+            print(f"\r{line}" if tty else line, end="" if tty else "\n", flush=True)
+    if tty:
+        print(flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -281,7 +310,7 @@ def build_real_real(
 
     tok = (lambda g: ngram_vocab[g]) if ngram_vocab is not None else (lambda g: g[0])
     examples: list[dict[str, object]] = []
-    for (pos, _), seqs in groups.items():
+    for (pos, _), seqs in progress(groups.items(), "pairing real words"):
         for i in range(len(seqs)):
             for j in range(i + 1, len(seqs)):
                 a, b = seqs[i], seqs[j]
@@ -315,7 +344,7 @@ def build_synthetic(
     ``'modified-source'`` is the reverse. The source is always built against the target.
     """
     examples: list[dict[str, object]] = []
-    for seq in usable_words(sequences, min_word_len):
+    for seq in progress(usable_words(sequences, min_word_len), f"editing words ({role})"):
         n_starts = min(max_pos, len(seq) - edit_ngram + 1)
         if n_starts <= 0:
             continue

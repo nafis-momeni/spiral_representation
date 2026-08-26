@@ -36,8 +36,9 @@ import statsmodels.formula.api as smf
 from matplotlib.ticker import MaxNLocator
 from scipy.stats import pearsonr, spearmanr
 
-from intervention.paths import STATES_DIR, get_train_dataset
+from intervention.paths import PLOTS_DIR as _PLOTS_ROOT, STATES_DIR, get_train_dataset
 from intervention.plotting.style import COLORS, INK, STRATA_COLORS, SURPRISAL_COLOR, paper_style
+from intervention.state_analysis.geometry import MAX_POS
 from intervention.state_analysis.states_extract import StatesDataset
 
 BOS = "<S>"
@@ -45,8 +46,7 @@ TARGETS = ["delta_h", "delta_c", "delta_state"]   # all computed; only NORM is p
 NORM = "norm_delta_state"                         # the one the report shows, ||Dz||
 SUR_COLS = ["s_bigram", "s_trigram", "s_cohort"]  # all computed
 FIGURE_SURS = ["s_bigram", "s_cohort"]            # the two the figures use
-MAX_POS = 12   # past this the per-position n is in the double digits and the curve is noise
-PLOTS_DIR = Path(__file__).resolve().parents[1] / "plots" / "surprisal"
+PLOTS_DIR = _PLOTS_ROOT / "surprisal"
 
 
 # --------------------------------------------------------------------------- #

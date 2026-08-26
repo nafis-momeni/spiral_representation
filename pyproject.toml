@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=1.26",
     "pandas>=2.2.3",
     "scipy>=1.15.1",
+    "statsmodels>=0.14",
     "scikit-learn>=1.6.1",
     "joblib>=1.4",
     "matplotlib>=3.10.0",
@@ -45,4 +46,5 @@ intervention = [
     "resources/datasets/*.csv",
     "resources/embeddings/*.npz",
     "grid_config.json",
+    "paper_grid.json",
 ]

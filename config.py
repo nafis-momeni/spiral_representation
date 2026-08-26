@@ -248,8 +248,9 @@ class ExperimentConfig:
     def to_flat(self) -> dict[str, Any]:
         """Flat dict for saving/summaries, including legacy aliases for older analysis code."""
         flat = {**asdict(self.data), **asdict(self.method), **asdict(self.train)}
-        flat["dataset_type"] = self.data.dataset  # alias read by paper_plots / analysis_plots
-        flat["scale_param"] = self.method.model   # alias read by paper_plots / analysis_plots
+        # Legacy aliases, kept so results written before the rename still load.
+        flat["dataset_type"] = self.data.dataset
+        flat["scale_param"] = self.method.model
         return flat
 
     def save(self, path: Path) -> None:

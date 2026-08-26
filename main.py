@@ -4,8 +4,11 @@
     python -m intervention.main --mode grid --n_jobs 4          # parallelise configs across CPU processes
     python -m intervention.main --mode single --seeds 42 43 44  # one config, cross-validated
 
-Outputs go under ``outputs/`` (results + dataset cache), which is git-ignored. Plot the
-results afterwards with ``python analysis_plots.py outputs/results``.
+Outputs go under ``results/`` (and the dataset cache under ``cache/``), both git-ignored.
+Plot a finished tree afterwards with ``python -m intervention.plotting.plots results``.
+
+For the paper's own runs and figures, use ``python -m intervention.reproduce`` instead:
+it pins the grid (``paper_grid.json``) and builds everything ``paper_plots.ipynb`` reads.
 """
 from __future__ import annotations
 

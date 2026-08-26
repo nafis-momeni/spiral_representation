@@ -1,19 +1,4 @@
-"""Untrained control: does the delta-norm decline need training, or is it just the LSTM?
 
-``surprisal.py`` rules out one confound. This rules out the plainer one: an LSTM's
-forget gate contracts and its tanh saturates, so state updates shrink with depth
-whether or not anything was learned. The same architecture is run at random
-initialisation over the same words, and the two curves are put side by side.
-
-Shapes, not magnitudes, are the comparison -- random weights land on an arbitrary
-scale -- so every curve also appears normalised to its own position-1 value. Several
-seeds, because one draw of random weights could be idiosyncratic.
-
-States are collected by unrolling the encoder step by step over a padded batch, which
-is equivalent to ``StateExtractor.extract_sequential`` (an LSTM from a zero state gives
-the same (h, c) whether the prefix is re-fed or the state is carried) but O(L) per word
-rather than O(L^2), so all 30k words take seconds instead of minutes.
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -24,15 +9,20 @@ import pandas as pd
 import torch
 
 from intervention.models.repeat_model import get_model
-from intervention.paths import get_phoneme_to_id, get_train_dataset, resolve_weights
+from intervention.paths import (
+    PLOTS_DIR as _PLOTS_ROOT,
+    get_phoneme_to_id,
+    get_train_dataset,
+    resolve_weights,
+)
+from intervention.state_analysis.geometry import MAX_POS
 from intervention.utils import seed_everything, set_device
 
 MODEL_NAME = "Ua_LSTM_h128_l1_v42_d0.0_t0.0_s1"
 WEIGHTS = "resources/weights/1024_75.pth"
 TARGETS = ["delta_h", "delta_c", "delta_state"]
 SEEDS = [0, 1, 2]
-MAX_POS = 12  # past this the per-position n is in the double digits and the curve is noise
-PLOTS_DIR = Path(__file__).resolve().parents[1] / "plots" / "random_baseline"
+PLOTS_DIR = _PLOTS_ROOT / "random_baseline"
 
 
 @torch.no_grad()
@@ -126,21 +116,37 @@ def plot_comparison(prof: pd.DataFrame, path: Path):
     plt.close(fig)
 
 
-if __name__ == "__main__":
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+def decay_ratios(prof: pd.DataFrame) -> pd.Series:
+    """Headline number: how much of the decline is there before any training at all?"""
+    kept = prof[(prof["position"] >= 1) & (prof["position"] <= MAX_POS)]
+    table = kept.pivot_table(index=["target", "model"], columns="position", values="norm")
+    return (table[MAX_POS] / table[1]).rename(f"norm[{MAX_POS}] / norm[1]")
+
+
+def main(out_dir: Path = PLOTS_DIR, force: bool = False) -> Path:
+    """Write ``profiles.csv`` (+ the comparison figure) and return the csv path."""
+    out_dir = Path(out_dir)
+    profiles_path = out_dir / "profiles.csv"
+    if profiles_path.exists() and not force:
+        print(f"[random baseline] up to date: {profiles_path}")
+        return profiles_path
+
+    out_dir.mkdir(parents=True, exist_ok=True)
     device = set_device()
     phoneme_to_id = get_phoneme_to_id()
     seqs = [list(p) + ["<EOS>"] for p in get_train_dataset()["No_Stress"]]
-    print(f"{len(seqs)} words, {sum(len(s) for s in seqs)} phoneme tokens")
+    print(f"[random baseline] {len(seqs)} words, "
+          f"{sum(len(s) for s in seqs)} phoneme tokens")
 
     prof = profiles(seqs, phoneme_to_id, device)
-    prof.to_csv(PLOTS_DIR / "profiles.csv", index=False)
-    plot_comparison(prof, PLOTS_DIR / "trained_vs_random.png")
+    prof.to_csv(profiles_path, index=False)
+    plot_comparison(prof, out_dir / "trained_vs_random.png")
 
-    # Headline number: how much of the decline is already there before any training?
-    kept = prof[(prof["position"] >= 1) & (prof["position"] <= MAX_POS)]
-    decay = kept.pivot_table(index=["target", "model"], columns="position", values="norm")
-    decay = (decay[MAX_POS] / decay[1]).rename(f"norm[{MAX_POS}] / norm[1]")
     print("\n=== decay ratio ===")
-    print(decay.round(3).to_string())
-    print(f"\nplots + profiles.csv -> {PLOTS_DIR}")
+    print(decay_ratios(prof).round(3).to_string())
+    print(f"\nplots + profiles.csv -> {out_dir}")
+    return profiles_path
+
+
+if __name__ == "__main__":
+    main()

@@ -14,25 +14,46 @@ systematic rotation of direction, a dynamic we formalise as a **spiral** model.
 
 ## Run
 
-Requires Python 3.11 or newer. Setup uses [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11 or newer. 
 
 ```bash
-git clone https://github.com/nafis-momeni/spiral_representation.git
-cd spiral_representation
 uv venv --python 3.11
-source .venv/bin/activate     # Windows: .venv\Scripts\activate
+source .venv/bin/activate   
 uv pip install -e .
 ```
 
-Training and plotting are separate steps. Every command below is run from the repo root
-with `.venv` active.
+### Reproducing the paper
+
+`plotting/paper_plots.ipynb` draws every figure in the paper and nothing else — the
+artifacts it reads are produced by one command:
+
+```bash
+python -m intervention.reproduce --n_jobs 6    
+```
+
+That runs four independent steps, each skipped when its output already exists
+(`--steps states runs baseline surprisal` selects a subset, `--force` rebuilds):
+
+
+- `states`:  `states_ds/{train,test}_states_*` — encoder states over the lexicon 
+- `runs` : `results/paper/<run_name>/` — the trained interventions in `paper_grid.json` 
+- `baseline`: `plots/random_baseline/profiles.csv` — untrained-encoder control 
+- `surprisal` : `plots/surprisal/regression.csv` — predictability control 
+
+
+
+### Exploring
+
+Training and plotting are separate steps. Every command below is run from the repo root.
 
 ```bash
 python -m intervention.main --mode grid                     # grid_config.json, CV per config
 python -m intervention.main --mode grid --n_jobs 4          # parallelise configs across CPU cores
 python -m intervention.main --mode single --seeds 42 43 44  # one config, cross-validated
-python -m intervention.plotting.plots results               # make all plots afterwards
 ```
+
+`grid_config.json` is the scratch grid for exploration; `paper_grid.json` is fixed and
+is what the paper reports.
 
 
 ## Models

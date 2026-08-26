@@ -1,412 +1,713 @@
+"""Figures for the paper, and the diagnostics for a single training run.
+
+Two layers, in this order:
+
+**Reading results.** ``Run`` is one ``seed_<n>/`` directory and ``CVRun`` is the config
+directory above it; both load lazily and cache, so a notebook can hold twenty of them and
+only pay for the ones it plots. ``load_runs`` sweeps a results tree and hands back the
+whole set keyed by run name. Nothing below ever opens a file itself.
+
+**Drawing.** Every figure function takes data (a frame, an array, a set of ``CVRun``),
+returns the ``Figure``, and saves only when given a ``path``. That is what makes them
+usable from ``paper_plots.ipynb`` — the notebook wants the figure inline — and from the
+command line, which wants a png::
+
+    python -m intervention.plotting.plots results/paper    # diagnostics for every run
+
+A note on ``scales``. For the spiral methods the rotation is part of the intervention, so
+``params.npz["scales"]`` is the *rotated* per-position vector that was actually applied —
+the effective scale. Do not rotate it again.
+"""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 import json
+import warnings
+from dataclasses import dataclass
+from functools import cached_property, lru_cache
+from pathlib import Path
+from typing import Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.figure import Figure
+from matplotlib.patches import Patch
 from sklearn.decomposition import PCA
 
 from intervention.paths import get_phoneme_features, get_phoneme_to_id, get_wfe_dataset
-import warnings
-
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning,
-    message=".*ChainedAssignmentError.*",
+from intervention.plotting.style import (
+    RANDOM_COLOR,
+    TRAINED_COLOR,
+    label_color,
+    method_color,
+    method_label,
+    paper_style,
 )
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning,
-    module="seaborn",
-)
+from intervention.state_analysis.geometry import MAX_POS
 
-PLOT_DPI = 150
-FIG_RECT = [0, 0, 1, 0.95]
-sns.set_style("whitegrid")
+warnings.filterwarnings("ignore", category=FutureWarning, module="seaborn")
 
+DEFAULT_FEATURES = ["position", "Lexicality", "Size", "Morphology", "type-change", "Condition"]
 
-def _ensure_dir(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-
-
-def _save_figure(fig: plt.Figure, path: Path, rect: list[float] = FIG_RECT) -> None:
-    fig.tight_layout(rect=rect)
-    fig.savefig(path, dpi=PLOT_DPI)
-    plt.close(fig)
+__all__ = [
+    "Run", "CVRun", "load_runs", "merge_predictions", "accuracy_table", "paper_style",
+    "norm_by_position", "similarity_histogram", "similarity_by_position",
+    "accuracy_by_position", "accuracy_bars", "scale_pca", "angle_by_position",
+    "scale_norm_by_position",
+    "dimension_by_position", "random_baseline", "training_curves",
+    "accuracy_by_feature", "embedding_pca", "report_run", "report_all",
+]
 
 
-def _flatten_scales(scales: np.ndarray) -> np.ndarray:
-    return scales.reshape(scales.shape[0], -1) if scales.ndim > 2 else scales
-
-
-def _coerce_match(series: pd.Series) -> pd.Series:
-    if series.dtype == object:
-        return pd.to_numeric(
-            series.astype(str).str.strip().str.lower().map({"true": 1, "false": 0}),
-            errors="coerce",
-        )
-    return pd.to_numeric(series, errors="coerce")
-
-
-def load_run_config(run_dir: Path) -> dict[str, object]:
-    with open(run_dir / "config.json", "r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def load_history(run_dir: Path) -> pd.DataFrame:
-    history = pd.read_csv(run_dir / "history.csv")
-    history["epoch"] = history.index
-    return history
-
-
-def load_prediction_data(run_dir: Path) -> pd.DataFrame:
-    return pd.read_csv(run_dir / "predictions.csv")
-
-
-def load_params(run_dir: Path) -> dict[str, np.ndarray]:
-    return dict(np.load(run_dir / "params.npz", allow_pickle=True))
-
-
-def plot_training_history(history: dict[str, list[float]] | pd.DataFrame, save_dir: Path, title: str = "") -> None:
-    _ensure_dir(save_dir)
-    history_df = pd.DataFrame(history) if isinstance(history, dict) else history.copy()
-    history_df["epoch"] = range(len(history_df))
-
-    loss_cols = [col for col in ["train_loss", "val_loss", "test_loss"] if col in history_df.columns]
-    acc_cols = [col for col in ["train_acc", "val_acc", "test_acc"] if col in history_df.columns]
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5), sharex=True)
-    sns.lineplot(data=history_df.melt(id_vars="epoch", value_vars=loss_cols, var_name="split", value_name="loss"), x="epoch", y="loss", hue="split", marker="o", ax=axes[0])
-    axes[0].set(xlabel="Epoch", ylabel="Loss")
-
-    sns.lineplot(data=history_df.melt(id_vars="epoch", value_vars=acc_cols, var_name="split", value_name="accuracy"), x="epoch", y="accuracy", hue="split", marker="o", ax=axes[1])
-    axes[1].set(xlabel="Epoch", ylabel="Accuracy")
-
-    for ax in axes:
-        ax.grid(alpha=0.3)
-        ax.legend(title="Split")
-
-    summary = [f"Train: {history_df.iloc[-1]['train_acc']:.4f}", f"Val: {history_df.iloc[-1]['val_acc']:.4f}"]
-    if "test_acc" in history_df.columns:
-        summary.append(f"Test: {history_df.iloc[-1]['test_acc']:.4f}")
-    axes[1].text(0.95, 0.05, "\n".join(summary), transform=axes[1].transAxes, ha="right", va="bottom", fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8, edgecolor="gray"))
-
-    if title:
-        fig.suptitle(title, y=0.98, fontsize=14)
-
-    _save_figure(fig, save_dir / "training_curves.png")
-
-
-def plot_scale_norms(scales: np.ndarray, save_dir: Path, title_suffix: str = "") -> None:
-    _ensure_dir(save_dir)
-    scales = _flatten_scales(scales)
-    norms = np.linalg.norm(scales, axis=1)
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    sns.lineplot(x=np.arange(len(norms)), y=norms, marker="o", ax=ax)
-    ax.set(xlabel="Position from Start", ylabel="Norm of Scale Vector", title=f"Norm of Intervention Scale by Position" + (f" - {title_suffix}" if title_suffix else ""))
-    _save_figure(fig, save_dir / "scale_norms.png")
-
-
-def plot_scale_stats(scales: np.ndarray, save_dir: Path, title_suffix: str = "") -> None:
-    _ensure_dir(save_dir)
-    scales = _flatten_scales(scales)
-    median = np.median(scales, axis=1)
-    mean = np.mean(scales, axis=1)
-    lower = np.percentile(scales, 25, axis=1)
-    upper = np.percentile(scales, 75, axis=1)
-
-    x = np.arange(len(median))
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(x, median, marker="o", label="median")
-    ax.plot(x, mean, marker="x", label="mean")
-    ax.fill_between(x, lower, upper, alpha=0.25, label="IQR (25-75%)")
-    ax.set(xlabel="Position from Start", ylabel="Scale value", title=f"Median scale across hidden units by position" + (f" - {title_suffix}" if title_suffix else ""))
-    ax.legend()
-    _save_figure(fig, save_dir / "scale_stats.png")
-
-
-
-def plot_scale_pca_polar(scales: np.ndarray, save_dir: Path, title_suffix: str = "") -> None:
-    _ensure_dir(save_dir)
-    pca = PCA(n_components=2)
-    scales_2d = pca.fit_transform(_flatten_scales(scales))
-    colors = np.arange(scales_2d.shape[0])
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    sns.scatterplot(x=scales_2d[:, 0], y=scales_2d[:, 1], hue=colors, palette="viridis", legend=False, s=80, ax=axes[0])
-    axes[0].set(xlabel=f"PC 1 ({pca.explained_variance_ratio_[0] * 100:.1f}% var)", ylabel=f"PC 2 ({pca.explained_variance_ratio_[1] * 100:.1f}% var)", title="Scale PCA 2D")
-    axes[0].grid(alpha=0.3)
-
-    ax2 = fig.add_subplot(1, 2, 2, projection="polar")
-    angles = np.arctan2(scales_2d[:, 1], scales_2d[:, 0])
-    r = np.linalg.norm(scales_2d, axis=1)
-    scatter = ax2.scatter(angles, r, c=colors, cmap="viridis", s=80)
-    fig.colorbar(scatter, ax=ax2, label="Position from Start", orientation="vertical")
-    ax2.set_title("Scale PCA Polar")
-
-    if title_suffix:
-        fig.suptitle(title_suffix, y=0.98, fontsize=14)
-
-    _save_figure(fig, save_dir / "scale_pca_polar.png")
-
-
-def plot_embedding_pca(embedding: np.ndarray, id_to_phoneme: dict[int, str], save_dir: Path, title_suffix: str = "", phoneme_types: dict[str, str] | None = None) -> None:
-    _ensure_dir(save_dir)
-    pca = PCA(n_components=2)
-    embedding_2d = pca.fit_transform(embedding)
-    explained_var = pca.explained_variance_ratio_ * 100
-
-    phonemes = [id_to_phoneme.get(i, f"id{i}") for i in range(len(embedding_2d))]
-    data = {"PC1": embedding_2d[:, 0], "PC2": embedding_2d[:, 1], "phoneme": phonemes}
-
-    if phoneme_types is not None:
-        def _get_type(val):
-            if isinstance(val, dict):
-                return val.get("Type", "other")
-            return val
-
-        data["type"] = [_get_type(phoneme_types.get(p, "other")) for p in phonemes]
-
-    df = pd.DataFrame(data)
-
-    fig, ax = plt.subplots(figsize=(12, 10))
-    scatter_args = dict(data=df, x="PC1", y="PC2", s=100, edgecolor="k", ax=ax)
-    if "type" in df.columns:
-        ax = sns.scatterplot(hue="type", palette="Set2", legend="full", **scatter_args)
-        ax.legend(title="Phoneme Type", bbox_to_anchor=(1.05, 1), loc="upper left")
-    else:
-        ax = sns.scatterplot(**scatter_args)
-
-    for _, row in df.iterrows():
-        ax.text(row["PC1"] + 0.005, row["PC2"] + 0.005, row["phoneme"], fontsize=7, alpha=0.8)
-
-    fig_title = f"Embedding PCA"
-    if title_suffix:
-        fig_title += f" - {title_suffix}"
-
-    ax.set(title=fig_title, xlabel=f"PC1 ({explained_var[0]:.1f}% var)", ylabel=f"PC2 ({explained_var[1]:.1f}% var)")
-    _save_figure(fig, save_dir / "embedding_pca.png")
-
-
-def create_merged_df(pred_df: pd.DataFrame, wfe_df: pd.DataFrame, phoneme_features: dict[str, dict[str, str]]) -> pd.DataFrame:
-    wfe_df = wfe_df.copy()
-    wfe_df["No_Stress_str"] = wfe_df["No_Stress"].apply(lambda x: " ".join(x).strip() if isinstance(x, (list, tuple)) else str(x).strip())
-
-    pred_df = pred_df.copy()
-    # =============================================================
-    # target for reverese order 
-    pred_df["input_no_eos"] = pred_df["input"].astype(str).str.replace("<EOS>", "", regex=False).str.strip()
-    if "match" in pred_df.columns:
-        pred_df["match"] = _coerce_match(pred_df["match"])
-    if "token_acc" in pred_df.columns:
-        pred_df["token_acc"] = pd.to_numeric(pred_df["token_acc"], errors="coerce")
-    if "position" in pred_df.columns:
-        pred_df["position"] = pd.to_numeric(pred_df["position"], errors="coerce")
-
-    merged_df = pd.merge(
-        pred_df,
-        wfe_df.drop(columns=[col for col in ["Phonemes"] if col in wfe_df.columns]),
-        left_on=["input_no_eos"],
-        right_on=["No_Stress_str"],
-        how="left",
-    )
-
-    keep_cols = [
-        "Word",
-        "Condition",
-        "input",
-        "target",
-        "prediction",
-        "position",
-        "old_phoneme",
-        "new_phoneme",
-        "seq_len",
-        "match",
-        "token_acc",
-    ]
-    keep_cols += [col for col in ["Lexicality", "Size", "Morphology", "Frequency", "Length", "Zipf_Frequency", "Part of Speech"] if col in merged_df.columns]
-    merged_df = merged_df[[col for col in keep_cols if col in merged_df.columns]]
-
-    def _phoneme_type(p):
-        type_val = phoneme_features.get(p, "other")
-        if isinstance(type_val, dict):
-            return type_val.get("Type", "other")
-        return type_val
-
-    merged_df["old-ph-type"] = merged_df["old_phoneme"].map(_phoneme_type)
-    merged_df["new-ph-type"] = merged_df["new_phoneme"].map(_phoneme_type)
-    merged_df["type-change"] = merged_df.apply(
-        lambda row: f"{row['old-ph-type']}-{row['new-ph-type']}" if pd.notna(row["old-ph-type"]) and pd.notna(row["new-ph-type"]) else None,
-        axis=1,
-    )
-    return merged_df
-
-
-def load_wfe_data() -> pd.DataFrame:
+# --------------------------------------------------------------------------- #
+# Reading results
+# --------------------------------------------------------------------------- #
+@lru_cache(maxsize=1)
+def _wfe() -> pd.DataFrame:
     return get_wfe_dataset()
 
 
-def load_phoneme_features() -> dict[str, dict[str, str]]:
+@lru_cache(maxsize=1)
+def _features() -> dict[str, dict[str, str]]:
     return get_phoneme_features()
 
 
-def plot_accuracy_by_feature(predictions: pd.DataFrame, save_dir: Path, feature_col: str, title_suffix: str = "") -> None:
-    if feature_col not in predictions.columns:
-        raise ValueError(f"Feature column '{feature_col}' not found in predictions")
+def _phoneme_type(phoneme) -> str | None:
+    entry = _features().get(phoneme)
+    return entry.get("Type", "other") if isinstance(entry, dict) else None
 
+
+def _as_numeric(series: pd.Series) -> pd.Series:
+    """``match`` arrives as True/False, "True"/"False" or 1/0 depending on the writer."""
+    if series.dtype == object:
+        series = series.astype(str).str.strip().str.lower().map({"true": 1, "false": 0})
+    return pd.to_numeric(series, errors="coerce")
+
+
+def merge_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Join a run's ``predictions.csv`` to the WFE frame's word-level factors.
+
+    The join key is the input sequence with ``<EOS>`` stripped, which is how the same word
+    is written on both sides. Adds the articulatory type of the edited-out and edited-in
+    phoneme (and their pairing, ``type-change``), so accuracy can be split by what kind of
+    substitution was asked for.
+    """
     predictions = predictions.copy()
-    if "match" in predictions.columns:
-        predictions["match"] = _coerce_match(predictions["match"])
+    predictions["input_no_eos"] = (
+        predictions["input"].astype(str).str.replace("<EOS>", "", regex=False).str.strip()
+    )
+    if "match" in predictions:
+        predictions["match"] = _as_numeric(predictions["match"])
+    for column in ("token_acc", "position"):
+        if column in predictions:
+            predictions[column] = pd.to_numeric(predictions[column], errors="coerce")
 
-    _ensure_dir(save_dir)
-    summary = predictions.groupby(feature_col)["match"].mean().reset_index().sort_values(by="match", ascending=False)
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-    sns.barplot(data=summary, x=feature_col, y="match", color="steelblue", ax=ax)
-    ax.set(xlabel=feature_col, ylabel="Accuracy", title=f"Accuracy by {feature_col}" + (f" - {title_suffix}" if title_suffix else ""))
-    ax.title.set_pad(12)
-    _save_figure(fig, save_dir / f"accuracy_by_{feature_col}.png")
-
-
-def plot_feature_accuracies_summary(merged_df: pd.DataFrame, save_dir: Path, feature_cols: list[str], title_suffix: str = "") -> None:
-    features = [feature for feature in feature_cols if feature in merged_df.columns]
-    if not features:
-        return
-
-    merged_df = merged_df.copy()
-    if "match" in merged_df.columns:
-        merged_df["match"] = _coerce_match(merged_df["match"])
-
-    n_cols = min(3, len(features))
-    n_rows = (len(features) + n_cols - 1) // n_cols
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows), squeeze=False)
-
-    for idx, feature in enumerate(features):
-        ax = axes[idx // n_cols][idx % n_cols]
-        summary = merged_df.groupby(feature)["match"].mean().reset_index().sort_values(by="match", ascending=False)
-        sns.barplot(data=summary, x=feature, y="match", color="steelblue", ax=ax)
-        ax.set(xlabel=feature, ylabel="Accuracy", title=feature, ylim=(0, 1))
-        if summary[feature].dtype == object:
-            ax.tick_params(axis="x", rotation=45)
-
-    for extra_ax in axes.flat[len(features):]:
-        fig.delaxes(extra_ax)
-
-    fig.suptitle("Accuracy by Feature" + (f" - {title_suffix}" if title_suffix else ""), y=0.98, fontsize=14)
-    _save_figure(fig, save_dir / "accuracy_by_features.png")
-
-
-def plot_run_summary(run_dir: Path, feature_cols: list[str] | None = None, phoneme_types: dict[str, str] | None = None) -> None:
-    if phoneme_types is None:
-        phoneme_types = load_phoneme_features()
-
-    config = load_run_config(run_dir)
-    embedding_init = config.get('embedding_init', 'none')
-    title = (
-        f"scale_param={config.get('scale_param')} | state_mode={config.get('state_mode')} | "
-        f"embed_init={embedding_init} | train_embed={ config.get('train_embedding', False)}"
+    wfe = _wfe().copy()
+    wfe["input_no_eos"] = wfe["No_Stress"].apply(
+        lambda seq: " ".join(seq).strip() if isinstance(seq, (list, tuple)) else str(seq).strip()
+    )
+    merged = predictions.merge(
+        wfe.drop(columns=[c for c in ("Phonemes", "No_Stress") if c in wfe]),
+        on="input_no_eos", how="left",
     )
 
-    plot_training_history(load_history(run_dir), run_dir, title=title)
+    merged["old-ph-type"] = merged["old_phoneme"].map(_phoneme_type)
+    merged["new-ph-type"] = merged["new_phoneme"].map(_phoneme_type)
+    both = merged["old-ph-type"].notna() & merged["new-ph-type"].notna()
+    merged["type-change"] = np.where(
+        both, merged["old-ph-type"].astype(str) + "-" + merged["new-ph-type"].astype(str), None
+    )
 
-    params = load_params(run_dir)
-    if "scales" in params:
-        plot_scale_norms(params["scales"], run_dir, title_suffix=title)
-        plot_scale_pca_polar(params["scales"], run_dir, title_suffix=title)
-
-    if "embedding" in params:
-        phoneme_to_id = {v: k for k, v in get_phoneme_to_id().items()}
-        try:
-            plot_embedding_pca(params["embedding"], phoneme_to_id, run_dir, title_suffix=title, phoneme_types=phoneme_types)
-        except Exception as exc:
-            error_text = f"Embedding PCA plot failed: {exc}\n"
-            (run_dir / "analysis_plot_errors.txt").write_text(error_text, encoding="utf-8")
-            print(error_text)
-    else:
-        print("No embedding key found in params.npz")
-
-    if feature_cols is not None:
-        predictions = load_prediction_data(run_dir)
-        merged_df = create_merged_df(predictions, load_wfe_data(), phoneme_types)
-        try:
-            plot_feature_accuracies_summary(merged_df, run_dir, feature_cols, title_suffix=title)
-        except Exception as exc:
-            error_text = f"Feature accuracy plot failed: {exc}\n"
-            (run_dir / "analysis_plot_errors.txt").write_text(error_text, encoding="utf-8")
-            print(error_text)
-        merged_df.to_csv(run_dir / "merged_predictions.csv", index=False)
+    keep = ["Word", "Condition", "input", "target", "prediction", "position", "old_phoneme",
+            "new_phoneme", "seq_len", "match", "token_acc", "old-ph-type", "new-ph-type",
+            "type-change", "Lexicality", "Size", "Morphology", "Frequency", "Length",
+            "Zipf_Frequency", "Part of Speech"]
+    return merged[[c for c in keep if c in merged]]
 
 
-DEFAULT_FEATURE_COLS = ["position", "Lexicality", "Size", "Morphology", "type-change", "Condition"]
+@dataclass
+class Run:
+    """One trained seed: the ``seed_<n>/`` directory written by ``experiments.runner``."""
+
+    path: Path
+
+    def __post_init__(self) -> None:
+        self.path = Path(self.path)
+
+    @property
+    def seed(self) -> int | None:
+        name = self.path.name
+        return int(name.split("_")[-1]) if name.startswith("seed_") else None
+
+    @cached_property
+    def config(self) -> dict:
+        return json.loads((self.path / "config.json").read_text())
+
+    @cached_property
+    def history(self) -> pd.DataFrame:
+        history = pd.read_csv(self.path / "history.csv")
+        return history.assign(epoch=range(len(history)))
+
+    @cached_property
+    def params(self) -> dict[str, np.ndarray]:
+        return dict(np.load(self.path / "params.npz", allow_pickle=True))
+
+    @cached_property
+    def predictions(self) -> pd.DataFrame:
+        """``predictions.csv`` joined to the word-level factors (see ``merge_predictions``)."""
+        return merge_predictions(pd.read_csv(self.path / "predictions.csv"))
+
+    @property
+    def scales(self) -> np.ndarray:
+        """Per-position scale vectors, ``(max_position, state_dim)``, rotation included."""
+        scales = self.params["scales"]
+        return scales.reshape(scales.shape[0], -1)
+
+    def __repr__(self) -> str:  # keeps notebook output readable
+        return f"Run({self.path.name})"
 
 
-def report_run(run_dir: Path, feature_cols: list[str] | None = None) -> None:
-    """Plot the summary figures for a single finished run."""
-    plot_run_summary(Path(run_dir), feature_cols=feature_cols or DEFAULT_FEATURE_COLS)
+@dataclass
+class CVRun:
+    """One config, cross-validated: the directory holding ``seed_*/`` and ``cv_metrics.csv``."""
+
+    path: Path
+
+    def __post_init__(self) -> None:
+        self.path = Path(self.path)
+
+    @cached_property
+    def runs(self) -> list[Run]:
+        return [Run(p) for p in sorted(self.path.glob("seed_*")) if (p / "config.json").exists()]
+
+    @cached_property
+    def config(self) -> dict:
+        summary = self.path / "cv_summary.json"
+        return json.loads(summary.read_text()) if summary.exists() else self.runs[0].config
+
+    @cached_property
+    def metrics(self) -> pd.DataFrame:
+        """One row per seed: test accuracy/loss, val accuracy, best epoch."""
+        return pd.read_csv(self.path / "cv_metrics.csv")
+
+    @cached_property
+    def predictions(self) -> pd.DataFrame:
+        """Every seed's merged predictions, stacked, with a ``seed`` column."""
+        return pd.concat([r.predictions.assign(seed=r.seed) for r in self.runs],
+                         ignore_index=True)
+
+    @cached_property
+    def scales_by_seed(self) -> np.ndarray:
+        """``(n_seeds, max_position, state_dim)`` — the effective (rotated) scale vectors."""
+        return np.stack([r.scales for r in self.runs])
+
+    @property
+    def scales(self) -> np.ndarray:
+        """Scale vectors of the first seed, the one the parameter figures illustrate."""
+        return self.runs[0].scales
+
+    @property
+    def model(self) -> str:
+        return self.config.get("model") or self.config.get("scale_param", "?")
+
+    @property
+    def embedding(self) -> str:
+        """Whether the identity embedding was trained alongside the scale, or held fixed."""
+        return "learned" if self.config.get("train_embedding") else "fixed"
+
+    @property
+    def label(self) -> str:
+        return method_label(self.model)
+
+    @property
+    def color(self) -> str:
+        return method_color(self.model)
+
+    def __repr__(self) -> str:
+        return f"CVRun({self.label}, {self.embedding}, n_seeds={len(self.runs)})"
 
 
-def report_all(results_dir: Path, feature_cols: list[str] | None = None) -> None:
-    """Plot every finished run under ``results_dir`` (recursively; a run == has config.json)."""
+def load_runs(results_dir: Path, names: Sequence[str] | None = None) -> dict[str, CVRun]:
+    """Every cross-validated run under ``results_dir``, keyed by directory name.
+
+    ``names`` restricts (and orders) the result — pass the run names a config expands to,
+    and a missing one raises here rather than surfacing as an empty figure later.
+    """
     results_dir = Path(results_dir)
-    run_dirs = sorted({p.parent for p in results_dir.rglob("config.json")})
+    found = {p.parent.name: CVRun(p.parent) for p in sorted(results_dir.rglob("cv_metrics.csv"))}
+    if names is None:
+        return found
+    missing = [n for n in names if n not in found]
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} run(s) not under {results_dir}: {missing}\n"
+            "Train them with `python -m intervention.reproduce --steps runs`."
+        )
+    return {n: found[n] for n in names}
+
+
+def accuracy_table(runs: Iterable[CVRun], by: str = "position") -> pd.DataFrame:
+    """Long format ``method / embedding / seed / <by> / accuracy``, one row per group.
+
+    ``by="position"`` gives the accuracy curve across edit positions; any other column of
+    the merged predictions works too (``Lexicality``, ``type-change``, ...).
+    """
+    frames = []
+    for run in runs:
+        grouped = (run.predictions.groupby(["seed", by])["match"].mean()
+                   .reset_index(name="accuracy"))
+        frames.append(grouped.assign(method=run.label, embedding=run.embedding))
+    return pd.concat(frames, ignore_index=True)
+
+
+# --------------------------------------------------------------------------- #
+# Drawing helpers
+# --------------------------------------------------------------------------- #
+def _finish(fig: Figure, path: Path | None = None, tight: bool = True) -> Figure:
+    """Every figure funnels through here: same tight-layout, same save behaviour."""
+    if tight:
+        fig.tight_layout()
+    if path is not None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, bbox_inches="tight")
+    return fig
+
+
+def _ordered(runs: Iterable[CVRun]) -> list[CVRun]:
+    """Stable plotting order: by method, then learned before fixed."""
+    return sorted(runs, key=lambda r: (r.label, r.embedding != "learned"))
+
+
+# --------------------------------------------------------------------------- #
+# Figure 1 — the geometry of the states
+# --------------------------------------------------------------------------- #
+def norm_by_position(norms: pd.DataFrame, ylabel: str = r"$\|\Delta z\|$",
+                     path: Path | None = None) -> Figure:
+    """Distribution of update magnitude at each position (``geometry.norm_table``)."""
+    fig, ax = plt.subplots(figsize=(9, 6))
+    sns.boxplot(data=norms, x="position", y="norm", ax=ax,
+                color=sns.color_palette("colorblind")[0], fliersize=2, linewidth=1.2)
+    ax.set_xlabel("Position", fontsize=20, labelpad=8)
+    ax.set_ylabel(ylabel, fontsize=20, labelpad=8)
+    ax.tick_params(axis="both", labelsize=15)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+def similarity_histogram(similarities: dict[str, np.ndarray],
+                         path: Path | None = None) -> Figure:
+    """Overlaid cosine-similarity distributions, one per phoneme-category pair.
+
+    The medians are drawn and labelled: whether C-V sits below C-C and V-V is the whole
+    question, and the eye reads that off the dashed lines faster than off the humps.
+    """
+    fig, ax = plt.subplots(figsize=(9, 6))
+    palette = sns.color_palette("colorblind")
+    for (label, values), color in zip(similarities.items(), palette):
+        median = float(np.median(values))
+        sns.histplot(values, label=label, alpha=0.4, stat="count", bins=50, ax=ax,
+                     color=color, edgecolor="none")
+        ax.axvline(median, linestyle="--", linewidth=1.8, color=color)
+        ax.text(median, ax.get_ylim()[1] * 0.98, f"{median:.3f}", color=color,
+                ha="center", va="bottom", fontsize=13, fontweight="bold", rotation=45)
+
+    ax.set_xlabel("Cosine similarity", fontsize=20, labelpad=8)
+    ax.set_ylabel("Count", fontsize=20, labelpad=8)
+    ax.tick_params(axis="both", labelsize=15)
+    ax.legend(fontsize=16, frameon=False)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+def similarity_by_position(similarity: pd.DataFrame, path: Path | None = None) -> Figure:
+    """Same-phoneme vs different-phoneme similarity across position.
+
+    Takes ``geometry.similarity_by_position``; the band is +/-1 std *across phonemes*, so
+    it shows how consistent the effect is over the inventory, not how many tokens there are.
+    """
+    palette = sns.color_palette("colorblind")
+    styles = {"same": (palette[0], "o", "Same phoneme"),
+              "different": (palette[3], "^", "Different phoneme")}
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    for kind, (color, marker, label) in styles.items():
+        part = similarity[similarity["kind"] == kind]
+        ax.plot(part["position"], part["mean"], color=color, marker=marker,
+                markersize=7, linewidth=2, label=label)
+        ax.fill_between(part["position"], part["mean"] - part["std"],
+                        part["mean"] + part["std"], color=color, alpha=0.18, linewidth=0)
+
+    ax.set_xlabel("Position", fontsize=14, labelpad=8)
+    ax.set_ylabel("Mean cosine similarity", fontsize=14, labelpad=8)
+    ax.set_xticks(sorted(similarity["position"].unique()))
+    ax.tick_params(axis="both", labelsize=12)
+    ax.grid(alpha=0.25, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.legend(fontsize=12, frameon=False)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+# --------------------------------------------------------------------------- #
+# Figure 2 — the intervention
+# --------------------------------------------------------------------------- #
+def accuracy_by_position(runs: Iterable[CVRun], max_pos: int = MAX_POS,
+                         path: Path | None = None) -> Figure:
+    """Intervention accuracy against edit position, one line per method x embedding.
+
+    Colour is the method, dash is whether the identity embedding was learned; the band is
+    +/-1 sd over CV seeds. ``max_pos`` is inclusive.
+    """
+    runs = _ordered(runs)
+    table = accuracy_table(runs, by="position")
+    table = table[table["position"] <= max_pos]
+    order = list(dict.fromkeys(r.label for r in runs))
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    sns.lineplot(data=table, x="position", y="accuracy", hue="method", style="embedding",
+                 hue_order=order, style_order=["learned", "fixed"],
+                 palette={r.label: r.color for r in runs},
+                 estimator="mean", errorbar="sd", err_style="band",
+                 err_kws={"alpha": 0.18}, linewidth=2, markers=False, ax=ax)
+
+    ax.set(xlabel="Position", ylabel="Intervention accuracy")
+    ax.grid(axis="y", alpha=0.18)
+    ax.grid(axis="x", alpha=0.08)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, title="")
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+def accuracy_bars(runs: Iterable[CVRun], path: Path | None = None) -> Figure:
+    """Overall test accuracy per method, learned vs fixed identity embedding.
+
+    Hatching (not a second colour) carries the embedding condition, so the method colours
+    stay the same ones used in every other panel.
+    """
+    runs = _ordered(runs)
+    table = pd.concat(
+        [r.metrics.assign(method=r.label, embedding=r.embedding) for r in runs],
+        ignore_index=True,
+    )
+    order = list(dict.fromkeys(r.label for r in runs))
+    hue_order = [e for e in ("learned", "fixed") if e in set(table["embedding"])]
+
+    fig, ax = plt.subplots(figsize=(1.9 * len(order) + 1.5, 4))
+    sns.barplot(data=table, x="method", y="final_test_acc", hue="embedding",
+                order=order, hue_order=hue_order, estimator="mean", errorbar="sd",
+                capsize=0.12, width=0.72, edgecolor="white", linewidth=0.8, ax=ax)
+
+    # One container per hue level, bars within it in `order` — no geometric guessing.
+    colors = {r.label: r.color for r in runs}
+    for container, embedding in zip(ax.containers, hue_order):
+        for bar, method in zip(container, order):
+            bar.set_facecolor(colors[method])
+            bar.set_edgecolor("white")
+            bar.set_alpha(0.7 if embedding == "learned" else 0.6)
+            if embedding != "learned":
+                bar.set_hatch("//")
+
+    # Label above the error bar, not above the bar: the caps would otherwise run through
+    # the text whenever the spread across seeds is wide.
+    stats = table.groupby(["method", "embedding"])["final_test_acc"].agg(["mean", "std"])
+    for container, embedding in zip(ax.containers, hue_order):
+        for bar, method in zip(container, order):
+            mean, std = stats.loc[(method, embedding)]
+            std = 0.0 if pd.isna(std) else std
+            ax.annotate(f"{mean:.2f} ± {std:.2f}",
+                        xy=(bar.get_x() + bar.get_width() / 2, bar.get_height() + std),
+                        xytext=(0, 6), textcoords="offset points", ha="center",
+                        va="bottom", fontsize=9, weight="bold", clip_on=False)
+
+    headroom = (table.groupby(["method", "embedding"])["final_test_acc"]
+                .agg(lambda s: s.mean() + (s.std(ddof=1) if len(s) > 1 else 0)).max())
+    ax.set(xlabel="", ylabel="Intervention accuracy", ylim=(0, min(1.05, headroom + 0.15)))
+    ax.grid(axis="y", alpha=0.18)
+    ax.grid(axis="x", visible=False)
+    ax.set_axisbelow(True)
+    ax.legend(title="Identity embedding", frameon=True, loc="upper left", fontsize=9,
+              title_fontsize=10, handles=[
+                  Patch(facecolor="white", edgecolor="black", label=e,
+                        hatch=None if e == "learned" else "//") for e in hue_order])
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+def scale_pca(scales: np.ndarray, max_pos: int = MAX_POS, polar: bool = False,
+              title: str = "", path: Path | None = None) -> Figure:
+    """The learned per-position scale vectors, projected to their top two components.
+
+    Position is the colour, so the onion prediction (points strung along one ray, only the
+    radius changing) and the spiral prediction (the angle turning with position) are
+    visibly different pictures. ``polar=True`` replots the same projection as
+    (angle, radius), which makes a constant per-step rotation read as even spacing.
+
+    ``scales`` must be the *effective* vectors — ``Run.scales`` / ``params.npz["scales"]``
+    already include the spiral rotation.
+    """
+    scales = np.asarray(scales)
+    scales = scales.reshape(scales.shape[0], -1)[: max_pos + 1]
+    pca = PCA(n_components=2)
+    projected = pca.fit_transform(scales)
+    position = np.arange(len(projected))
+    var1, var2 = pca.explained_variance_ratio_[:2] * 100
+
+    if polar:
+        fig, ax = plt.subplots(figsize=(6.2, 5.6), subplot_kw={"projection": "polar"})
+        scatter = ax.scatter(np.arctan2(projected[:, 1], projected[:, 0]),
+                             np.linalg.norm(projected, axis=1), c=position, cmap="viridis",
+                             s=70, alpha=0.95, edgecolors="white", linewidths=0.7)
+        ax.set_theta_zero_location("E")
+        ax.set_theta_direction(-1)
+        ax.set_rlabel_position(135)
+        ax.grid(alpha=0.22, linewidth=0.8)
+        ax.spines["polar"].set_visible(False)
+        ax.text(0.02, 0.02, f"PC1: {var1:.1f}%\nPC2: {var2:.1f}%", transform=ax.transAxes,
+                ha="left", va="bottom", fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
+                          edgecolor="0.85", alpha=0.9))
+    else:
+        fig, ax = plt.subplots(figsize=(5.4, 4.4))
+        scatter = ax.scatter(projected[:, 0], projected[:, 1], c=position,
+                             cmap="viridis", s=60, edgecolors="white", linewidths=0.6)
+        ax.set(xlabel=f"PC1 ({var1:.1f}% var)", ylabel=f"PC2 ({var2:.1f}% var)")
+        ax.grid(alpha=0.2)
+        ax.set_axisbelow(True)
+        sns.despine(ax=ax)
+
+    bar = fig.colorbar(scatter, ax=ax, pad=0.1 if polar else 0.02, shrink=0.82)
+    bar.set_label("Position")
+    bar.set_ticks([0, len(projected) - 1])
+    if title:
+        ax.set_title(title, pad=12)
+    return _finish(fig, path)
+
+
+def angle_by_position(angles: dict[str, np.ndarray], path: Path | None = None) -> Figure:
+    """Angle to the position-0 scale vector, per method.
+
+    Flat at zero is the onion hypothesis — position rescales one fixed direction. A curve
+    that climbs is direction turning with position, which is the spiral claim.
+    """
+    fig, ax = plt.subplots(figsize=(5.4, 4))
+    markers = ["o", "s", "^", "D", "v"]
+    for (label, values), marker in zip(angles.items(), markers):
+        ax.plot(np.arange(len(values)), values, marker=marker, markersize=5,
+                linewidth=1.8, label=label, color=label_color(label))
+    ax.set(xlabel="Position", ylabel="Angle to position 0 (degrees)")
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.2)
+    ax.set_axisbelow(True)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+def scale_norm_by_position(runs: Iterable[CVRun], max_pos: int = MAX_POS,
+                           log: bool = True, path: Path | None = None) -> Figure:
+    """Magnitude of the learned scale vector by position, mean and 95% CI over CV seeds.
+
+    The companion to ``angle_by_position``: a spiral is a radius and an angle, and this is
+    the radius. Log scale by default — an unbounded parameterisation can run three orders
+    of magnitude past a bounded one, which a linear axis renders as one curve and a flat
+    line along zero.
+    """
+    fig, ax = plt.subplots(figsize=(6.5, 4.2))
+    for run in _ordered(runs):
+        norms = np.linalg.norm(run.scales_by_seed[:, : max_pos + 1], axis=-1)  # (seeds, positions)
+        mean = norms.mean(axis=0)
+        n = len(norms)
+        ci = 1.96 * norms.std(axis=0, ddof=1) / np.sqrt(n) if n > 1 else np.zeros_like(mean)
+        style = "-" if run.embedding == "learned" else "--"
+        position = np.arange(len(mean))
+        ax.plot(position, mean, style, color=run.color, linewidth=2,
+                label=f"{run.label} ({run.embedding})")
+        lower = np.maximum(mean - ci, mean * 1e-3) if log else mean - ci
+        ax.fill_between(position, lower, mean + ci, color=run.color, alpha=0.18, linewidth=0)
+
+    if log:
+        ax.set_yscale("log")
+    ax.set(xlabel="Position", ylabel="Norm of scale vector")
+    ax.legend(frameon=False, fontsize=8, ncol=2)
+    ax.grid(alpha=0.2)
+    ax.set_axisbelow(True)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+# --------------------------------------------------------------------------- #
+# Appendix
+# --------------------------------------------------------------------------- #
+def dimension_by_position(dimensions: pd.DataFrame, metric: str = "d90",
+                          path: Path | None = None) -> Figure:
+    """``geometry.dimension_by_position``: how many directions each position's cloud uses."""
+    labels = {"d90": "PCs for 90% of variance", "participation_ratio": "Participation ratio"}
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for (embed_type, part), marker in zip(dimensions.groupby("embed_type", sort=False),
+                                          ["o", "s", "^", "D"]):
+        ax.plot(part["position"], part[metric], marker=marker, markersize=5,
+                linewidth=1.8, label=embed_type)
+    ax.set(xlabel="Position", ylabel=labels.get(metric, metric))
+    ax.legend(frameon=False)
+    ax.grid(alpha=0.2)
+    ax.set_axisbelow(True)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+def random_baseline(profiles: pd.DataFrame, target: str = "delta_state", max_pos: int = MAX_POS,
+                    rescale: bool = False, path: Path | None = None) -> Figure:
+    """Trained encoder against randomly initialised ones (``random_baseline.profiles``).
+
+    ``rescale=True`` divides each curve by its own position-1 value, which is the honest
+    comparison: random weights land on an arbitrary scale, so only the shape transfers.
+    """
+    part = profiles[(profiles["target"] == target)
+                    & profiles["position"].between(1, max_pos)]
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for label, group in part.groupby("model", sort=False):
+        y = group.set_index("position")["norm"]
+        if rescale:
+            y = y / y.iloc[0]
+        trained = label == "trained"
+        ax.plot(y.index, y.values, label=label,
+                color=TRAINED_COLOR if trained else RANDOM_COLOR,
+                linewidth=2.8 if trained else 1.3,
+                marker="o" if trained else None, markersize=7,
+                zorder=3 if trained else 1)
+    if rescale:
+        ax.axhline(1.0, color="k", linewidth=0.6, linestyle=":")
+
+    ax.set(xlabel="Position",
+           ylabel=r"$\|\Delta z\|$ relative to position 1" if rescale else r"$\|\Delta z\|$")
+    ax.legend(frameon=False)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+# --------------------------------------------------------------------------- #
+# Per-run diagnostics
+# --------------------------------------------------------------------------- #
+def training_curves(history: pd.DataFrame, title: str = "",
+                    path: Path | None = None) -> Figure:
+    """Loss and accuracy per epoch for every split present in ``history.csv``."""
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), sharex=True)
+    for ax, metric, label in zip(axes, ("loss", "acc"), ("Loss", "Accuracy")):
+        columns = [f"{s}_{metric}" for s in ("train", "val", "test")
+                   if f"{s}_{metric}" in history]
+        long = history.melt(id_vars="epoch", value_vars=columns,
+                            var_name="split", value_name=metric)
+        long["split"] = long["split"].str.replace(f"_{metric}", "", regex=False)
+        sns.lineplot(data=long, x="epoch", y=metric, hue="split", marker="o", ax=ax)
+        ax.set(xlabel="Epoch", ylabel=label)
+        ax.grid(alpha=0.3)
+        ax.legend(title="Split", frameon=False)
+
+    final = history.iloc[-1]
+    summary = "\n".join(f"{s.capitalize()}: {final[f'{s}_acc']:.4f}"
+                        for s in ("train", "val", "test") if f"{s}_acc" in history)
+    axes[1].text(0.95, 0.05, summary, transform=axes[1].transAxes, ha="right", va="bottom",
+                 fontsize=9, bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                                       alpha=0.8, edgecolor="gray"))
+    if title:
+        fig.suptitle(title, fontsize=11)
+    return _finish(fig, path)
+
+
+def accuracy_by_feature(predictions: pd.DataFrame, features: Sequence[str] = DEFAULT_FEATURES,
+                        title: str = "", path: Path | None = None) -> Figure | None:
+    """Mean accuracy within each level of every requested factor, one panel per factor."""
+    features = [f for f in features if f in predictions]
+    if not features:
+        return None
+
+    columns = min(3, len(features))
+    rows = (len(features) + columns - 1) // columns
+    fig, axes = plt.subplots(rows, columns, figsize=(5.5 * columns, 4 * rows), squeeze=False)
+    for ax, feature in zip(axes.flat, features):
+        summary = (predictions.groupby(feature)["match"].mean().reset_index()
+                   .sort_values("match", ascending=False))
+        sns.barplot(data=summary, x=feature, y="match", color="steelblue", ax=ax)
+        ax.set(xlabel="", ylabel="Accuracy", title=feature, ylim=(0, 1))
+        if summary[feature].dtype == object:
+            ax.tick_params(axis="x", rotation=45)
+    for extra in axes.flat[len(features):]:
+        fig.delaxes(extra)
+
+    fig.suptitle(title or "Accuracy by feature", fontsize=12)
+    return _finish(fig, path)
+
+
+def embedding_pca(embedding: np.ndarray, title: str = "",
+                  path: Path | None = None) -> Figure:
+    """The learned identity embedding in two components, labelled and coloured by type."""
+    pca = PCA(n_components=2)
+    projected = pca.fit_transform(embedding)
+    id_to_phoneme = {i: p for p, i in get_phoneme_to_id().items()}
+    table = pd.DataFrame({
+        "PC1": projected[:, 0], "PC2": projected[:, 1],
+        "phoneme": [id_to_phoneme.get(i, f"id{i}") for i in range(len(projected))],
+    })
+    table["type"] = table["phoneme"].map(_phoneme_type).fillna("other")
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    sns.scatterplot(data=table, x="PC1", y="PC2", hue="type", palette="Set2",
+                    s=90, edgecolor="k", ax=ax)
+    for _, row in table.iterrows():
+        ax.text(row["PC1"], row["PC2"], row["phoneme"], fontsize=7, alpha=0.8)
+    variance = pca.explained_variance_ratio_ * 100
+    ax.set(title=title or "Identity embedding (PCA)",
+           xlabel=f"PC1 ({variance[0]:.1f}% var)", ylabel=f"PC2 ({variance[1]:.1f}% var)")
+    ax.legend(title="Phoneme type", bbox_to_anchor=(1.02, 1), loc="upper left", frameon=False)
+    return _finish(fig, path)
+
+
+def report_run(run_dir: Path, features: Sequence[str] = DEFAULT_FEATURES) -> None:
+    """Write the diagnostic figures for one trained seed, next to its artifacts."""
+    run = Run(run_dir)
+    config = run.config
+    title = (f"{config.get('model')} | state={config.get('state_mode')} | "
+             f"init={config.get('embedding_init')} | train_embed={config.get('train_embedding')}")
+
+    plt.close(training_curves(run.history, title=title, path=run.path / "training_curves.png"))
+    if "scales" in run.params:
+        plt.close(scale_pca(run.scales, title=title, path=run.path / "scale_pca.png"))
+        plt.close(scale_pca(run.scales, polar=True, path=run.path / "scale_pca_polar.png"))
+    if "embedding" in run.params:
+        plt.close(embedding_pca(run.params["embedding"], title=title,
+                                path=run.path / "embedding_pca.png"))
+
+    predictions = run.predictions
+    predictions.to_csv(run.path / "merged_predictions.csv", index=False)
+    figure = accuracy_by_feature(predictions, features, title=f"Accuracy by feature — {title}",
+                                 path=run.path / "accuracy_by_features.png")
+    if figure is not None:
+        plt.close(figure)
+
+
+def report_all(results_dir: Path, features: Sequence[str] = DEFAULT_FEATURES) -> None:
+    """Diagnostics for every trained seed under ``results_dir``; one bad run never stops the batch."""
+    run_dirs = sorted({p.parent for p in Path(results_dir).rglob("config.json")})
     if not run_dirs:
         print(f"No runs (config.json) found under {results_dir}")
         return
     for run_dir in run_dirs:
         print(f"Plotting {run_dir} ...")
         try:
-            report_run(run_dir, feature_cols=feature_cols)
-        except Exception as exc:  # keep going; one bad run shouldn't stop the batch
+            report_run(run_dir, features)
+        except Exception as exc:
             print(f"  skipped ({exc})")
-
-
-def plot_cv_scales(run_dir: Path, title_suffix: str = "") -> None:
-    """Mean scale-norm by position with a 95% CI band across CV seeds."""
-    run_dir = Path(run_dir)
-    stacked_path = run_dir / "params_by_seed.npz"
-    if not stacked_path.exists():
-        return
-    data = np.load(stacked_path, allow_pickle=True)
-    if "scales" not in data.files:
-        return
-
-    scales = data["scales"]                              # (n_seeds, n_pos, state_dim)
-    scales = scales.reshape(scales.shape[0], scales.shape[1], -1)
-    norms = np.linalg.norm(scales, axis=-1)             # (n_seeds, n_pos)
-    n = norms.shape[0]
-    mean = norms.mean(axis=0)
-    ci = 1.96 * norms.std(axis=0, ddof=1) / np.sqrt(n) if n > 1 else np.zeros_like(mean)
-
-    x = np.arange(mean.shape[0])
-    fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(x, mean, marker="o", label=f"mean over {n} seeds")
-    ax.fill_between(x, mean - ci, mean + ci, alpha=0.25, label="95% CI")
-    ax.set(xlabel="Position from Start", ylabel="Norm of Scale Vector",
-           title="Scale norm by position (CV)" + (f" - {title_suffix}" if title_suffix else ""))
-    ax.legend()
-    _save_figure(fig, run_dir / "cv_scale_norms_ci.png")
-
-
-def report_cv(run_dir: Path) -> None:
-    """CV-level plot: scale-norm CI band (per-seed run plots come from report_all)."""
-    run_dir = Path(run_dir)
-    summary = json.loads((run_dir / "cv_summary.json").read_text())
-    title = f"{summary.get('run_name', run_dir.name)} | acc={summary.get('final_test_acc_mean', float('nan')):.3f}±{summary.get('final_test_acc_std', 0):.3f}"
-    plot_cv_scales(run_dir, title_suffix=title)
 
 
 if __name__ == "__main__":
     import sys
 
+    paper_style()
     target = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("results")
     if (target / "config.json").exists():
         report_run(target)
     else:
         report_all(target)
-        for cv_dir in sorted({p.parent for p in target.rglob("cv_summary.json")}):
-            report_cv(cv_dir)

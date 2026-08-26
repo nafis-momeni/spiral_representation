@@ -30,10 +30,12 @@ def grid_iter(grid: dict[str, Iterable]) -> Iterable[dict]:
 
 
 def load_grid_from_json(json_path: Path) -> dict[str, list]:
+    """Read a flat grid. JSON has no comments, so keys starting with ``_`` are dropped —
+    that is where a grid file explains itself (every other key must be a config field)."""
     grid = json.loads(Path(json_path).read_text())
     if not isinstance(grid, dict):
         raise ValueError("Grid JSON must be an object mapping parameter names to lists.")
-    return grid
+    return {k: v for k, v in grid.items() if not k.startswith("_")}
 
 
 def dedupe_configs(configs: list[ExperimentConfig]) -> list[ExperimentConfig]:
@@ -127,19 +129,28 @@ def _prewarm_cache(configs: list[ExperimentConfig], cache_dir: Path, skip_existi
     phoneme_to_id = get_phoneme_to_id()
     device = _torch.device("cpu")
     models: dict[tuple[str, str], object] = {}
+
+    # Collect the unique combos first, so the terminal can show "i/N" while they build.
+    combos: list[tuple[ExperimentConfig, int]] = []
     seen: set[tuple] = set()
     for cfg in configs:
         model_key = (cfg.train.model_name, cfg.train.weights_path)
         for seed in cfg.train.seeds:
             key = (json.dumps(cfg.data.cache_fields(), sort_keys=True), seed, *model_key)
-            if key in seen:
-                continue
-            seen.add(key)
-            if model_key not in models:
-                models[model_key] = _load_repeat_model(cfg.train, device)
-            build_loaders(cfg.data, seed, phoneme_to_id, models[model_key], device,
-                          batch_size=cfg.train.batch_size, cache_dir=cache_dir)
-    print(f"Pre-warmed dataset cache for {len(seen)} unique (data, seed) combos")
+            if key not in seen:
+                seen.add(key)
+                combos.append((cfg, seed))
+
+    print(f"Pre-warming dataset cache: {len(combos)} unique (data, seed) combos "
+          f"(cached ones are skipped)", flush=True)
+    for i, (cfg, seed) in enumerate(combos, start=1):
+        print(f"[data {i}/{len(combos)}] {cfg.data.dataset} seed {seed}", flush=True)
+        model_key = (cfg.train.model_name, cfg.train.weights_path)
+        if model_key not in models:
+            models[model_key] = _load_repeat_model(cfg.train, device)
+        build_loaders(cfg.data, seed, phoneme_to_id, models[model_key], device,
+                      batch_size=cfg.train.batch_size, cache_dir=cache_dir)
+    print(f"Pre-warmed dataset cache for {len(combos)} unique (data, seed) combos", flush=True)
 
 
 def save_grid_summary(rows: list[dict], base_dir: Path) -> None:
