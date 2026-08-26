@@ -14,14 +14,14 @@ systematic rotation of direction, a dynamic we formalise as a **spiral** model.
 
 ## Run
 
-Requires Python 3.11 or newer.
+Requires Python 3.11 or newer. Setup uses [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/nafis-momeni/spiral_representation.git
 cd spiral_representation
-python3 -m venv .venv
+uv venv --python 3.11
 source .venv/bin/activate     # Windows: .venv\Scripts\activate
-pip install -e .
+uv pip install -e .
 ```
 
 Training and plotting are separate steps. Every command below is run from the repo root
