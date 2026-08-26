@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: intervention
+Version: 0.1.0
+Summary: Causal interventions on the hidden states of a phoneme repeat model
+Requires-Python: >=3.11
+Requires-Dist: torch>=2.5.1
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.2.3
+Requires-Dist: scipy>=1.15.1
+Requires-Dist: scikit-learn>=1.6.1
+Requires-Dist: joblib>=1.4
+Requires-Dist: matplotlib>=3.10.0
+Requires-Dist: seaborn>=0.13.2
+Requires-Dist: plotly>=5.24
+Requires-Dist: xarray>=2024.7
+Requires-Dist: tqdm>=4.66.0
