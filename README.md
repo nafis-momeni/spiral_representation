@@ -1,7 +1,6 @@
 # Intervention experiments
 
-Code for *Geometry in the Neural Processing of Phoneme Sequences: How Does Phoneme Identity
-Bind to Position?*
+Code for *Binding Phoneme Identity to Position in Neural Models and the Human Brain*
 
 This project tests the geometry of phoneme position in RNNs causally. It trains a small
 intervention on the frozen phoneme repeat model, editing the encoder state to substitute one
