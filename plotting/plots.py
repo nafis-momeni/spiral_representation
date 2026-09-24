@@ -53,6 +53,7 @@ DEFAULT_FEATURES = ["position", "Lexicality", "Size", "Morphology", "type-change
 __all__ = [
     "Run", "CVRun", "load_runs", "merge_predictions", "accuracy_table", "paper_style",
     "norm_by_position", "similarity_histogram", "similarity_by_position",
+    "position_similarity_matrix",
     "accuracy_by_position", "accuracy_bars", "scale_pca", "angle_by_position",
     "scale_norm_by_position",
     "dimension_by_position", "random_baseline", "training_curves",
@@ -284,9 +285,10 @@ def _ordered(runs: Iterable[CVRun]) -> list[CVRun]:
 # Figure 1 — the geometry of the states
 # --------------------------------------------------------------------------- #
 def norm_by_position(norms: pd.DataFrame, ylabel: str = r"$\|\Delta z\|$",
+                     fig_size=(9, 6),
                      path: Path | None = None) -> Figure:
     """Distribution of update magnitude at each position (``geometry.norm_table``)."""
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=fig_size)
     sns.boxplot(data=norms, x="position", y="norm", ax=ax,
                 color=sns.color_palette("colorblind")[0], fliersize=2, linewidth=1.2)
     ax.set_xlabel("Position", fontsize=20, labelpad=8)
@@ -297,13 +299,14 @@ def norm_by_position(norms: pd.DataFrame, ylabel: str = r"$\|\Delta z\|$",
 
 
 def similarity_histogram(similarities: dict[str, np.ndarray],
+                         fig_size=(9, 6),
                          path: Path | None = None) -> Figure:
     """Overlaid cosine-similarity distributions, one per phoneme-category pair.
 
     The medians are drawn and labelled: whether C-V sits below C-C and V-V is the whole
     question, and the eye reads that off the dashed lines faster than off the humps.
     """
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=fig_size)
     palette = sns.color_palette("colorblind")
     for (label, values), color in zip(similarities.items(), palette):
         median = float(np.median(values))
@@ -331,7 +334,7 @@ def similarity_by_position(similarity: pd.DataFrame, path: Path | None = None) -
     styles = {"same": (palette[0], "o", "Same phoneme"),
               "different": (palette[3], "^", "Different phoneme")}
 
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=(8.6, 4))
     for kind, (color, marker, label) in styles.items():
         part = similarity[similarity["kind"] == kind]
         ax.plot(part["position"], part["mean"], color=color, marker=marker,
@@ -350,10 +353,43 @@ def similarity_by_position(similarity: pd.DataFrame, path: Path | None = None) -
     return _finish(fig, path)
 
 
+def position_similarity_matrix(matrix: pd.DataFrame, title: str = "", cmap: str = "viridis",
+                               fig_size=(5.4, 4.6), max_pos: int = MAX_POS,
+                               vmin: float | None = None,
+                               vmax: float | None = None, path: Path | None = None) -> Figure:
+    """One of the ``geometry.position_similarity_matrix`` frames as a heatmap.
+
+    Rows and columns are positions, so the diagonal is a phoneme against itself at the
+    same position in other words and the off-diagonal is the same phoneme carried to a
+    different position. Both frames share a scale when ``vmin``/``vmax`` are given, which
+    is what makes the same-phoneme and different-phoneme panels comparable side by side.
+    """
+
+    positions = [p for p in matrix.index if p <= max_pos]
+    matrix = matrix.loc[positions, [c for c in matrix.columns if c <= max_pos]]
+    fig, ax = plt.subplots(figsize=fig_size)
+    image = ax.imshow(matrix.to_numpy(), cmap=cmap, origin="lower", aspect="equal",
+                      vmin=vmin, vmax=vmax)
+
+    ax.set_xticks(range(len(positions)), positions)
+    ax.set_yticks(range(len(positions)), positions)
+    ax.set_xlabel("Position", fontsize=16, labelpad=8)
+    ax.set_ylabel("Position", fontsize=16, labelpad=8)
+    ax.tick_params(axis="both", labelsize=12)
+    ax.grid(False)
+    if title:
+        ax.set_title(title, fontsize=14, pad=8)
+
+    bar = fig.colorbar(image, ax=ax, location="right", fraction=0.046, pad=0.04)
+    bar.set_label("Mean cosine similarity", fontsize=18, labelpad=8)
+    bar.ax.tick_params(labelsize=11)
+    return _finish(fig, path)
+
 # --------------------------------------------------------------------------- #
 # Figure 2 — the intervention
 # --------------------------------------------------------------------------- #
 def accuracy_by_position(runs: Iterable[CVRun], max_pos: int = MAX_POS,
+                         fig_size=(9, 5),
                          path: Path | None = None) -> Figure:
     """Intervention accuracy against edit position, one line per method x embedding.
 
@@ -365,23 +401,26 @@ def accuracy_by_position(runs: Iterable[CVRun], max_pos: int = MAX_POS,
     table = table[table["position"] <= max_pos]
     order = list(dict.fromkeys(r.label for r in runs))
 
-    fig, ax = plt.subplots(figsize=(9, 4))
+    fig, ax = plt.subplots(figsize=fig_size)
     sns.lineplot(data=table, x="position", y="accuracy", hue="method", style="embedding",
                  hue_order=order, style_order=["learned", "fixed"],
                  palette={r.label: r.color for r in runs},
                  estimator="mean", errorbar="sd", err_style="band",
                  err_kws={"alpha": 0.18}, linewidth=2, markers=False, ax=ax)
 
-    ax.set(xlabel="Position", ylabel="Intervention accuracy")
+    ax.set_xlabel("Position", fontsize=18, labelpad=8)
+    ax.set_ylabel("Intervention accuracy", fontsize=18, labelpad=8)
+    ax.tick_params(axis="both", labelsize=14)
     ax.grid(axis="y", alpha=0.18)
     ax.grid(axis="x", alpha=0.08)
     ax.set_axisbelow(True)
-    ax.legend(frameon=False, title="")
+    ax.legend(frameon=False, title="", fontsize=14)
     sns.despine(ax=ax)
     return _finish(fig, path)
 
 
-def accuracy_bars(runs: Iterable[CVRun], path: Path | None = None) -> Figure:
+
+def accuracy_bars(runs: Iterable[CVRun],fig_size=(4.4, 4), path: Path | None = None) -> Figure:
     """Overall test accuracy per method, learned vs fixed identity embedding.
 
     Hatching (not a second colour) carries the embedding condition, so the method colours
@@ -395,7 +434,7 @@ def accuracy_bars(runs: Iterable[CVRun], path: Path | None = None) -> Figure:
     order = list(dict.fromkeys(r.label for r in runs))
     hue_order = [e for e in ("learned", "fixed") if e in set(table["embedding"])]
 
-    fig, ax = plt.subplots(figsize=(1.9 * len(order) + 1.5, 4))
+    fig, ax = plt.subplots(figsize=fig_size)
     sns.barplot(data=table, x="method", y="final_test_acc", hue="embedding",
                 order=order, hue_order=hue_order, estimator="mean", errorbar="sd",
                 capsize=0.12, width=0.72, edgecolor="white", linewidth=0.8, ax=ax)
@@ -420,16 +459,19 @@ def accuracy_bars(runs: Iterable[CVRun], path: Path | None = None) -> Figure:
             ax.annotate(f"{mean:.2f} ± {std:.2f}",
                         xy=(bar.get_x() + bar.get_width() / 2, bar.get_height() + std),
                         xytext=(0, 6), textcoords="offset points", ha="center",
-                        va="bottom", fontsize=9, weight="bold", clip_on=False)
+                        va="bottom", fontsize=13, weight="bold", clip_on=False)
 
     headroom = (table.groupby(["method", "embedding"])["final_test_acc"]
                 .agg(lambda s: s.mean() + (s.std(ddof=1) if len(s) > 1 else 0)).max())
-    ax.set(xlabel="", ylabel="Intervention accuracy", ylim=(0, min(1.05, headroom + 0.15)))
+    ax.set(xlabel="", ylim=(0, min(1.05, headroom + 0.15)))
+    ax.set_ylabel("Intervention accuracy", fontsize=18, labelpad=8)
+    ax.tick_params(axis="both", labelsize=14)
     ax.grid(axis="y", alpha=0.18)
     ax.grid(axis="x", visible=False)
     ax.set_axisbelow(True)
-    ax.legend(title="Identity embedding", frameon=True, loc="upper left", fontsize=9,
-              title_fontsize=10, handles=[
+    ax.legend(title="Identity embedding", frameon=False, loc="lower center",
+              bbox_to_anchor=(0.5, 1.0), ncol=len(hue_order), fontsize=13,
+              title_fontsize=14, handles=[
                   Patch(facecolor="white", edgecolor="black", label=e,
                         hatch=None if e == "learned" else "//") for e in hue_order])
     sns.despine(ax=ax)
@@ -456,33 +498,48 @@ def scale_pca(scales: np.ndarray, max_pos: int = MAX_POS, polar: bool = False,
     var1, var2 = pca.explained_variance_ratio_[:2] * 100
 
     if polar:
-        fig, ax = plt.subplots(figsize=(6.2, 5.6), subplot_kw={"projection": "polar"})
+        fig, ax = plt.subplots(figsize=(7, 5.7), subplot_kw={"projection": "polar"})
         scatter = ax.scatter(np.arctan2(projected[:, 1], projected[:, 0]),
                              np.linalg.norm(projected, axis=1), c=position, cmap="viridis",
                              s=70, alpha=0.95, edgecolors="white", linewidths=0.7)
         ax.set_theta_zero_location("E")
         ax.set_theta_direction(-1)
-        ax.set_rlabel_position(135)
+        # Keep the angular degrees: the rotation per position is what the figure is for.
+        # The radial labels are PCA-projection units, which say nothing a reader can act on.
+        ax.set_yticklabels([])
+        ax.tick_params(axis="x", labelsize=20)
         ax.grid(alpha=0.22, linewidth=0.8)
         ax.spines["polar"].set_visible(False)
-        ax.text(0.02, 0.02, f"PC1: {var1:.1f}%\nPC2: {var2:.1f}%", transform=ax.transAxes,
-                ha="left", va="bottom", fontsize=9,
-                bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                          edgecolor="0.85", alpha=0.9))
+        # Every diagonal corner now carries a degree label, so the variance box sits below
+        # the axes instead. Anchored in axes coordinates, not figure ones: ``_finish``
+        # tight-layouts the figure, which would discard a ``subplots_adjust``, whereas
+        # ``bbox_inches="tight"`` grows the saved bounds to include this.
+        ax.annotate(f"PC1: {var1:.1f}%   PC2: {var2:.1f}%",
+                    xy=(1.0, -0.14), xycoords="axes fraction", ha="right", va="top",
+                    fontsize=22,
+                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
+                              edgecolor="0.85", alpha=0.9))
     else:
-        fig, ax = plt.subplots(figsize=(5.4, 4.4))
+        fig, ax = plt.subplots(figsize=(6.6, 5.2))
         scatter = ax.scatter(projected[:, 0], projected[:, 1], c=position,
                              cmap="viridis", s=60, edgecolors="white", linewidths=0.6)
-        ax.set(xlabel=f"PC1 ({var1:.1f}% var)", ylabel=f"PC2 ({var2:.1f}% var)")
+        ax.set_xlabel(f"PC1 ({var1:.1f}% var)", fontsize=18, labelpad=8)
+        ax.set_ylabel(f"PC2 ({var2:.1f}% var)", fontsize=18, labelpad=8)
+        ax.tick_params(axis="both", labelsize=14)
         ax.grid(alpha=0.2)
         ax.set_axisbelow(True)
         sns.despine(ax=ax)
 
-    bar = fig.colorbar(scatter, ax=ax, pad=0.1 if polar else 0.02, shrink=0.82)
-    bar.set_label("Position")
+    bar = fig.colorbar(scatter, ax=ax, location="left" if polar else "right",
+                       pad=0.1 if polar else 0.02, shrink=1.0 if polar else 0.82)
+    # Pull "Position" in against the bar on the polar figure; the Cartesian one keeps the
+    # matplotlib default, so passing labelpad at all is polar-only.
+    bar.set_label("Position", fontsize=23 if polar else 16,
+                  **({"labelpad": -12} if polar else {}))
     bar.set_ticks([0, len(projected) - 1])
+    bar.ax.tick_params(labelsize=21 if polar else 14)
     if title:
-        ax.set_title(title, pad=12)
+        ax.set_title(title, pad=16 if polar else 12, fontsize=25 if polar else 18)
     return _finish(fig, path)
 
 
@@ -492,13 +549,15 @@ def angle_by_position(angles: dict[str, np.ndarray], path: Path | None = None) -
     Flat at zero is the onion hypothesis — position rescales one fixed direction. A curve
     that climbs is direction turning with position, which is the spiral claim.
     """
-    fig, ax = plt.subplots(figsize=(5.4, 4))
+    fig, ax = plt.subplots(figsize=(7, 5))
     markers = ["o", "s", "^", "D", "v"]
     for (label, values), marker in zip(angles.items(), markers):
         ax.plot(np.arange(len(values)), values, marker=marker, markersize=5,
                 linewidth=1.8, label=label, color=label_color(label))
-    ax.set(xlabel="Position", ylabel="Angle to position 0 (degrees)")
-    ax.legend(frameon=False)
+    ax.set_xlabel("Position", fontsize=18, labelpad=8)
+    ax.set_ylabel("Angle to position 0 (degrees)", fontsize=18, labelpad=8)
+    ax.tick_params(axis="both", labelsize=14)
+    ax.legend(frameon=False, fontsize=14)
     ax.grid(alpha=0.2)
     ax.set_axisbelow(True)
     sns.despine(ax=ax)
@@ -514,7 +573,7 @@ def scale_norm_by_position(runs: Iterable[CVRun], max_pos: int = MAX_POS,
     of magnitude past a bounded one, which a linear axis renders as one curve and a flat
     line along zero.
     """
-    fig, ax = plt.subplots(figsize=(6.5, 4.2))
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
     for run in _ordered(runs):
         norms = np.linalg.norm(run.scales_by_seed[:, : max_pos + 1], axis=-1)  # (seeds, positions)
         mean = norms.mean(axis=0)
@@ -529,8 +588,10 @@ def scale_norm_by_position(runs: Iterable[CVRun], max_pos: int = MAX_POS,
 
     if log:
         ax.set_yscale("log")
-    ax.set(xlabel="Position", ylabel="Norm of scale vector")
-    ax.legend(frameon=False, fontsize=8, ncol=2)
+    ax.set_xlabel("Position", fontsize=18, labelpad=8)
+    ax.set_ylabel("Norm of scale vector", fontsize=18, labelpad=8)
+    ax.tick_params(axis="both", labelsize=14)
+    ax.legend(frameon=False, fontsize=12, ncol=2)
     ax.grid(alpha=0.2)
     ax.set_axisbelow(True)
     sns.despine(ax=ax)
@@ -549,8 +610,10 @@ def dimension_by_position(dimensions: pd.DataFrame, metric: str = "d90",
                                           ["o", "s", "^", "D"]):
         ax.plot(part["position"], part[metric], marker=marker, markersize=5,
                 linewidth=1.8, label=embed_type)
-    ax.set(xlabel="Position", ylabel=labels.get(metric, metric))
-    ax.legend(frameon=False)
+    ax.set_xlabel("Position", fontsize=18, labelpad=8)
+    ax.set_ylabel(labels.get(metric, metric), fontsize=18, labelpad=8)
+    ax.tick_params(axis="both", labelsize=14)
+    ax.legend(frameon=False, fontsize=14)
     ax.grid(alpha=0.2)
     ax.set_axisbelow(True)
     sns.despine(ax=ax)
@@ -581,9 +644,11 @@ def random_baseline(profiles: pd.DataFrame, target: str = "delta_state", max_pos
     if rescale:
         ax.axhline(1.0, color="k", linewidth=0.6, linestyle=":")
 
-    ax.set(xlabel="Position",
-           ylabel=r"$\|\Delta z\|$ relative to position 1" if rescale else r"$\|\Delta z\|$")
-    ax.legend(frameon=False)
+    ax.set_xlabel("Position", fontsize=18, labelpad=8)
+    ax.set_ylabel(r"$\|\Delta z\|$ relative to position 1" if rescale else r"$\|\Delta z\|$",
+                  fontsize=18, labelpad=8)
+    ax.tick_params(axis="both", labelsize=14)
+    ax.legend(frameon=False, fontsize=14)
     sns.despine(ax=ax)
     return _finish(fig, path)
 

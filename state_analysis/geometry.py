@@ -7,6 +7,7 @@ nothing in this module touches matplotlib.
     norm_table            how big is the update at each position?          -> ||Dz|| by position
     category_similarity   do consonants and vowels move in the same way?   -> cosine sims by C/V pair
     similarity_by_position is the direction of the update phoneme-specific? -> cosine sims by position
+    position_similarity_matrix does that direction survive a change of position? -> position x position sims
     dimension_by_position  how many directions does it use?                -> d90 / participation ratio
     angles_to_first        does the intervention's scale rotate with position?
 
@@ -23,7 +24,7 @@ from intervention.paths import get_phoneme_features
 
 # Last position any figure shows, inclusive -- the same bound ``surprisal`` and
 # ``random_baseline`` use. Past here the per-position n is in the double digits.
-MAX_POS = 12
+MAX_POS = 9
 
 
 def phoneme_categories() -> tuple[list[str], list[str]]:
@@ -91,7 +92,7 @@ def category_similarity(
 def similarity_by_position(
     dataset,
     embed_type: str = "delta_state",
-    min_pos: int = 1,
+    min_pos: int = 0,
     max_pos: int = MAX_POS,
     max_per_cell: int = 1000,
     max_per_position: int = 2000,
@@ -134,6 +135,117 @@ def similarity_by_position(
                                                     max_per_position, rng)))
     return pd.DataFrame(rows)
 
+
+def _within_word_pairs(metadata, unit, n_phonemes, n_positions, valid, phoneme_code,
+                       position_code, chunk: int = 200_000):
+    """Summed dot products and counts of same-word pairs, keyed by ``[phoneme, pos_a, pos_b]``.
+
+    Two states taken from one word are not an independent comparison of positions, so the
+    matrices below subtract them out. Returns ``(dots_all, count_all, dots_same,
+    count_same)``; the ``_same`` pair counts only partners carrying the anchor's phoneme.
+    """
+    rows = pd.DataFrame({"seq_id": metadata["seq_id"].to_numpy(),
+                         "row": np.arange(len(metadata), dtype=np.int64)})
+    pairs = rows.merge(rows, on="seq_id", suffixes=("_a", "_b"))
+    left, right = pairs["row_a"].to_numpy(), pairs["row_b"].to_numpy()
+    keep = (left != right) & valid[phoneme_code[right], position_code[right]]
+    left, right = left[keep], right[keep]
+
+    dots = np.empty(len(left))
+    for start in range(0, len(left), chunk):  # gathering the pairs is the memory cost
+        window = slice(start, start + chunk)
+        dots[window] = np.einsum("ij,ij->i", unit[left[window]], unit[right[window]])
+
+    flat = (phoneme_code[left] * n_positions + position_code[left]) * n_positions + position_code[right]
+    same = phoneme_code[left] == phoneme_code[right]
+    size, shape = n_phonemes * n_positions * n_positions, (n_phonemes, n_positions, n_positions)
+    return (np.bincount(flat, weights=dots, minlength=size).reshape(shape),
+            np.bincount(flat, minlength=size).astype(float).reshape(shape),
+            np.bincount(flat[same], weights=dots[same], minlength=size).reshape(shape),
+            np.bincount(flat[same], minlength=size).astype(float).reshape(shape))
+
+
+def position_similarity_matrix(
+    dataset,
+    embed_type: str = "delta_state",
+    min_count: int = 10,
+    min_pos: int = 0,
+    max_pos: int = MAX_POS,
+    exclude_same_word: bool = True,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Mean cosine similarity between every pair of positions, same vs different phoneme.
+
+    ``similarity_by_position`` asks whether a phoneme's update is its own at one position;
+    this asks whether it is the *same* update at another one — entry ``[p, q]`` of the
+    first frame is a phoneme at position p against itself at position q, averaged over the
+    inventory, and of the second against every other phoneme there. A diagonal that stays
+    high while the off-diagonal falls away is position-specific coding.
+
+    Exact and cheap: with the states unit-normalised, the mean over all pairs of two groups
+    is the dot product of their sums, so this costs O(N*d) rather than the O(N^2*d) of an
+    explicit pair matrix and needs no subsampling. Self-comparisons and, by default, both
+    states of any within-word pair are removed, so every number compares different words.
+
+    Position 0 is kept, unlike ``similarity_by_position``: here it is the row that gives
+    the rest of the map its reference point, the context-free state each phoneme starts
+    from. Its diagonal is 1 by construction — ``delta[0]`` is the state itself, the same
+    vector in every word — so pass ``min_pos=1`` to drop it and spread the colour scale
+    over the positions that carry context.
+    """
+    metadata = dataset.metadata
+    inside = ((dataset.metadata["position"] >= min_pos)
+              & (dataset.metadata["position"] <= max_pos)).to_numpy()
+    metadata = metadata.loc[inside].reset_index(drop=True)
+    unit = dataset.get_embeddings(embed_type)[inside]
+    unit = unit / np.linalg.norm(unit, axis=1, keepdims=True)  # cosine == dot product
+
+    phonemes = sorted(metadata["phoneme"].unique())
+    positions = sorted(metadata["position"].unique())
+    phoneme_at = {p: k for k, p in enumerate(phonemes)}
+    position_at = {p: i for i, p in enumerate(positions)}
+    n_ph, n_pos, width = len(phonemes), len(positions), unit.shape[1]
+    phoneme_code = metadata["phoneme"].map(phoneme_at).to_numpy()
+    position_code = metadata["position"].map(position_at).to_numpy()
+
+    # One sum and one count per (phoneme, position) cell: everything below is built from these.
+    sums = np.zeros((n_ph, n_pos, width))
+    counts = np.zeros((n_ph, n_pos))
+    for (phoneme, position), index in metadata.groupby(["phoneme", "position"]).indices.items():
+        sums[phoneme_at[phoneme], position_at[position]] = unit[index].sum(0)
+        counts[phoneme_at[phoneme], position_at[position]] = len(index)
+    valid = counts >= min_count
+
+    if exclude_same_word:
+        dots_all, count_all, dots_same, count_same = _within_word_pairs(
+            metadata, unit, n_ph, n_pos, valid, phoneme_code, position_code)
+    else:
+        dots_all = count_all = dots_same = count_same = np.zeros((n_ph, n_pos, n_pos))
+    diagonal = np.arange(n_pos)
+
+    # A phoneme at p against itself at q.
+    total = np.einsum("kpd,kqd->kpq", sums, sums) - dots_same
+    pairs = counts[:, :, None] * counts[:, None, :] - count_same
+    if exclude_same_word:
+        total[:, diagonal, diagonal] -= counts  # a state is trivially similar to itself
+        pairs[:, diagonal, diagonal] -= counts
+    usable = valid[:, :, None] & valid[:, None, :] & (pairs > 0)
+    per_phoneme_same = np.where(usable, total / np.where(pairs > 0, pairs, 1), np.nan)
+
+    # A phoneme at p against the pool of every other phoneme at q.
+    pool_sum = (sums * valid[:, :, None]).sum(0)
+    pool_count = (counts * valid).sum(0)
+    own_sum = np.where(valid[:, :, None], sums, 0.0)  # its own share of that pool
+    own_count = np.where(valid, counts, 0.0)
+    total = (np.einsum("kpd,qd->kpq", sums, pool_sum)
+             - np.einsum("kpd,kqd->kpq", sums, own_sum) - (dots_all - dots_same))
+    pairs = (counts[:, :, None] * (pool_count[None, None, :] - own_count[:, None, :])
+             - (count_all - count_same))
+    usable = valid[:, :, None] & (pairs > 0)
+    per_phoneme_cross = np.where(usable, total / np.where(pairs > 0, pairs, 1), np.nan)
+
+    frame = lambda cube: pd.DataFrame(np.nanmean(cube, axis=0), index=positions, columns=positions
+                                      ).rename_axis(index="position", columns="position")
+    return frame(per_phoneme_same), frame(per_phoneme_cross)
 
 def _mean_offdiagonal(matrix: np.ndarray) -> float:
     upper = matrix[np.triu_indices_from(matrix, k=1)]

@@ -125,9 +125,10 @@ class InterventionTrainer:
                 pred_ids = preds[i, :sl].cpu().tolist()
                 target_ids = targets[i, :sl].cpu().tolist()
                 input_ids = batch["input"][i, :sl].tolist()
-                records.append({
-                    "input": " ".join(id_to_phoneme[t] for t in input_ids),
-                    "source": " ".join(id_to_phoneme[t] for t in batch["source"][i, :sl].tolist()),
+                row = {"input": " ".join(id_to_phoneme[t] for t in input_ids)}
+                if "source" in batch:  # only methods that read a source have one
+                    row["source"] = " ".join(id_to_phoneme[t] for t in batch["source"][i, :sl].tolist())
+                row |= {
                     "target": " ".join(id_to_phoneme[t] for t in target_ids),
                     "prediction": " ".join(id_to_phoneme[p] for p in pred_ids),
                     "position": batch["position"][i].item(),
@@ -136,7 +137,8 @@ class InterventionTrainer:
                     "seq_len": sl,
                     "match": pred_ids == target_ids,
                     "token_acc": sum(p == t for p, t in zip(pred_ids, target_ids)) / sl,
-                })
+                }
+                records.append(row)
         return pd.DataFrame(records)
 
     # -- fit with early stopping -------------------------------------------- #

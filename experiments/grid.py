@@ -136,7 +136,8 @@ def _prewarm_cache(configs: list[ExperimentConfig], cache_dir: Path, skip_existi
     for cfg in configs:
         model_key = (cfg.train.model_name, cfg.train.weights_path)
         for seed in cfg.train.seeds:
-            key = (json.dumps(cfg.data.cache_fields(), sort_keys=True), seed, *model_key)
+            key = (json.dumps(cfg.data.cache_fields(cfg.method.is_das), sort_keys=True),
+                   seed, *model_key)
             if key not in seen:
                 seen.add(key)
                 combos.append((cfg, seed))
@@ -149,7 +150,8 @@ def _prewarm_cache(configs: list[ExperimentConfig], cache_dir: Path, skip_existi
         if model_key not in models:
             models[model_key] = _load_repeat_model(cfg.train, device)
         build_loaders(cfg.data, seed, phoneme_to_id, models[model_key], device,
-                      batch_size=cfg.train.batch_size, cache_dir=cache_dir)
+                      batch_size=cfg.train.batch_size, cache_dir=cache_dir,
+                      needs_source=cfg.method.is_das)
     print(f"Pre-warmed dataset cache for {len(combos)} unique (data, seed) combos", flush=True)
 
 

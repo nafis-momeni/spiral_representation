@@ -79,6 +79,7 @@ def run_experiment(
     loaders, max_position, ngram_vocab = build_loaders(
         cfg.data, seed, phoneme_to_id, repeat_model, device,
         batch_size=cfg.train.batch_size, cache_dir=cache_dir, verbose=verbose,
+        needs_source=cfg.method.is_das,
     )
 
     intervention, trainer = _build_method(cfg, repeat_model, max_position, phoneme_to_id,

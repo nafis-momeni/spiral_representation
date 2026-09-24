@@ -2,8 +2,8 @@
 
 Used by every method (scale and DAS). It owns the train/val/test split and a
 **content-addressed cache**: each split's cache filename hashes every field that changes
-its content (dataset, seed, filters, ...), so repeated runs — e.g. across CV seeds — are
-fast and can never serve a stale dataset.
+its content (dataset, seed, filters, whether a DAS source is built, ...), so repeated runs
+— e.g. across CV seeds — are fast and can never serve a stale dataset.
 """
 from __future__ import annotations
 
@@ -125,10 +125,17 @@ def build_loaders(
     batch_size: int = 32,
     cache_dir: Path | None = None,
     verbose: bool = False,
+    needs_source: bool = True,
 ) -> tuple[dict[str, DataLoader], int, dict[tuple[int, ...], int] | None]:
     """Return ``{"train"/"val"/"test": DataLoader}``, the max word length (= scale
     ``max_position`` = DAS ``n_variables``), and — for ``edit_ngram > 1`` — the n-gram
-    vocabulary that ``old_token``/``new_token`` index (``None`` for phoneme edits)."""
+    vocabulary that ``old_token``/``new_token`` index (``None`` for phoneme edits).
+
+    ``needs_source`` (pass ``method.is_das``) asks for the random-context source. Only DAS
+    reads it, and sampling one is destructive: an example whose source fails the gate is
+    dropped, and that failure rate climbs steeply with word length, so building it for a
+    method that ignores it silently biases the split towards short words. Scale runs pass
+    False, keep every example, and get their own cache key."""
     data_cfg.validate()
     id_to_phoneme = {v: k for k, v in phoneme_to_id.items()}
     pad_id, eos_id = phoneme_to_id["<PAD>"], phoneme_to_id["<EOS>"]
@@ -151,10 +158,13 @@ def build_loaders(
         ngram_vocab = build_ngram_vocab(all_sequences, data_cfg.edit_ngram)
         if verbose:
             print(f"  ngram vocab: {len(ngram_vocab)} attested {data_cfg.edit_ngram}-grams")
-    # The random-context source always samples from the chain (markov edits do too).
-    chain = build_chain(all_sequences, special_tokens)
-    if verbose:
-        print(f"  markov chain: {sum(len(v) for v in chain['succ'].values())} attested bigrams")
+    # The chain only feeds *generated* sequences: the random-context source and markov
+    # edits. A scale run with uniform edits needs neither, so never pay to build it.
+    chain = None
+    if needs_source or data_cfg.edit_sampler == "markov":
+        chain = build_chain(all_sequences, special_tokens)
+        if verbose:
+            print(f"  markov chain: {sum(len(v) for v in chain['succ'].values())} attested bigrams")
 
     gate = Gate(special_tokens=special_tokens, check_repeat=data_cfg.check_repeat,
                 check_cv_pattern=data_cfg.check_cv_pattern, check_n_gram=data_cfg.check_n_gram,
@@ -164,16 +174,16 @@ def build_loaders(
     loaders: dict[str, DataLoader] = {}
     for split, frame in frames.items():
         # The cache key is the full data identity for this split (never batch_size).
-        key = {**data_cfg.cache_fields(), "seed": seed, "split": split}
-        cache_path = _cache_path(cache_dir, data_cfg.dataset, split, key,
-                                 tag="_".join(data_cfg.filter_tokens()))
+        key = {**data_cfg.cache_fields(needs_source), "seed": seed, "split": split}
+        tokens = data_cfg.filter_tokens() + ([] if needs_source else ["nosrc"])
+        cache_path = _cache_path(cache_dir, data_cfg.dataset, split, key, tag="_".join(tokens))
 
         # Independent per-(seed, split) RNG -> each split reproducible and cacheable alone.
         split_rng = np.random.default_rng([seed, _SPLIT_INDEX[split]])
         source_maker = SourceMaker(
             gate=gate, rng=split_rng, chain=chain,
             edit_ngram=data_cfg.edit_ngram, var_ngram=data_cfg.var_ngram,
-        )
+        ) if needs_source else None
 
         if data_cfg.dataset == "real-real":
             build_fn = lambda f=frame, sm=source_maker: build_real_real(

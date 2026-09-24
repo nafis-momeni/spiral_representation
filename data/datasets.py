@@ -4,12 +4,16 @@ Every example, whatever the dataset family, is the same four things:
 
     input   the word the frozen model encodes  (the DAS "base")
     target  the word it must produce           (the counterfactual)
-    source  the word the intervention reads from
+    source  the word the intervention reads from (DAS only -- see below)
     position, old_token, new_token             where the edit is and what it swapped
 
-``source`` is always *random-context*: it carries only the phonemes the target needs at
-the edit window (see :func:`keep_window`) and resamples everything else from the attested-
-bigram chain, so the intervention cannot read surrounding context off it.
+``source`` is *random-context*: it carries only the phonemes the target needs at the edit
+window (see :func:`keep_window`) and resamples everything else from the attested-bigram
+chain, so the intervention cannot read surrounding context off it. Only DAS reads it, and
+it is built only when asked for (``source_maker=None`` otherwise): sampling one is
+destructive -- an example whose source fails the gate is dropped, and that failure rate
+climbs with word length, so building it for a method that ignores it biases the split
+short. See ``build_loaders(needs_source=...)``.
 
 Two families produce those examples:
   * real-real       — ordered minimal pairs of real words
@@ -275,8 +279,11 @@ class SourceMaker:
 
 
 def _example(inp, tgt, src, pos, old_token, new_token) -> dict[str, object]:
-    return {"input": inp, "target": tgt, "source": src,
-            "position": pos, "old_token": old_token, "new_token": new_token}
+    ex = {"input": inp, "target": tgt,
+          "position": pos, "old_token": old_token, "new_token": new_token}
+    if src is not None:  # absent for methods that never read one
+        ex["source"] = src
+    return ex
 
 
 def usable_words(sequences: list[list[int]], min_word_len: int) -> list[list[int]]:
@@ -295,7 +302,7 @@ def usable_words(sequences: list[list[int]], min_word_len: int) -> list[list[int
 def build_real_real(
     df, phoneme_col: str, phoneme_to_id: dict[str, int], n: int,
     ngram_vocab: dict[tuple[int, ...], int] | None,
-    source_maker: SourceMaker, min_word_len: int,
+    source_maker: SourceMaker | None, min_word_len: int,
 ) -> list[dict[str, object]]:
     """Ordered pairs of real words that share everything outside one ``n``-position
     window. For n=1 that is the classic minimal pair; for n>1 any difference inside the
@@ -320,9 +327,10 @@ def build_real_real(
                 if ngram_vocab is not None and (ga not in ngram_vocab or gb not in ngram_vocab):
                     continue
                 for base, other, g_base, g_other in ((a, b, ga, gb), (b, a, gb, ga)):
-                    src = source_maker(other, pos)
-                    if src is not None:
-                        examples.append(_example(base, other, src, pos, tok(g_base), tok(g_other)))
+                    src = source_maker(other, pos) if source_maker is not None else None
+                    if source_maker is not None and src is None:
+                        continue  # no source survived the gate -> DAS cannot use this pair
+                    examples.append(_example(base, other, src, pos, tok(g_base), tok(g_other)))
     return examples
 
 
@@ -334,14 +342,15 @@ def build_synthetic(
     random_replace_pos: bool,
     rng: np.random.Generator,
     edit_ngram: int,
-    source_maker: SourceMaker,
+    source_maker: SourceMaker | None,
     min_word_len: int,
     **edit_kwargs,
 ) -> list[dict[str, object]]:
     """Edit each word at one random position (or every position) and keep what survives.
 
     ``role='source-modified'`` feeds the original and asks for the edited word;
-    ``'modified-source'`` is the reverse. The source is always built against the target.
+    ``'modified-source'`` is the reverse. The source, when a method needs one, is built
+    against the target; ``source_maker=None`` keeps every edit that survives its own gate.
     """
     examples: list[dict[str, object]] = []
     for seq in progress(usable_words(sequences, min_word_len), f"editing words ({role})"):
@@ -358,9 +367,10 @@ def build_synthetic(
                 inp, tgt, old, new = seq, modified, old_token, new_token
             else:
                 inp, tgt, old, new = modified, seq, new_token, old_token
-            src = source_maker(tgt, pos)
-            if src is not None:
-                examples.append(_example(inp, tgt, src, pos, old, new))
+            src = source_maker(tgt, pos) if source_maker is not None else None
+            if source_maker is not None and src is None:
+                continue  # no source survived the gate -> DAS cannot use this example
+            examples.append(_example(inp, tgt, src, pos, old, new))
     return examples
 
 
@@ -374,7 +384,8 @@ def _pad(seq: list[int], pad_id: int, max_len: int) -> torch.Tensor:
 
 class PairDataset(Dataset):
     """Pads pre-built examples. ``input``/``target``/``source`` are always equal length,
-    so ``seq_len`` describes all three and ``seq_len - 1`` is the phoneme count."""
+    so ``seq_len`` describes all three and ``seq_len - 1`` is the phoneme count.
+    ``source`` is emitted only when the examples carry one (DAS)."""
 
     def __init__(self, examples: list[dict], pad_id: int, eos_id: int, max_len: int = 20):
         self.examples, self.pad_id, self.eos_id, self.max_len = examples, pad_id, eos_id, max_len
@@ -384,12 +395,14 @@ class PairDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         ex = self.examples[idx]
-        return {
+        item = {
             "input": _pad(ex["input"] + [self.eos_id], self.pad_id, self.max_len),
             "target": _pad(ex["target"] + [self.eos_id], self.pad_id, self.max_len),
-            "source": _pad(ex["source"] + [self.eos_id], self.pad_id, self.max_len),
             "old_token": torch.tensor(ex["old_token"], dtype=torch.long),
             "new_token": torch.tensor(ex["new_token"], dtype=torch.long),
             "position": torch.tensor(ex["position"], dtype=torch.long),
             "seq_len": torch.tensor(len(ex["input"]) + 1, dtype=torch.long),
         }
+        if "source" in ex:
+            item["source"] = _pad(ex["source"] + [self.eos_id], self.pad_id, self.max_len)
+        return item

@@ -86,6 +86,7 @@ def evaluate_run(
     loaders, max_position, ngram_vocab = build_loaders(
         cfg.data, seed, phoneme_to_id, repeat_model, device,
         batch_size=trained.train.batch_size, cache_dir=cache_dir,
+        needs_source=trained.method.is_das,
     )
 
     intervention, trainer = _build_method(trained, repeat_model, max_position, phoneme_to_id,
