@@ -43,10 +43,13 @@ class DataConfig:
       * source-modified — real word in, synthetically edited word as target
       * modified-source — edited word in, original real word as target
     The ``check_*`` flags filter synthetic edits (unused for real-real).
+    ``heldout_positions`` keeps edits at those positions out of train and val only, so a
+    run scores on test a position it never trained (or early-stopped) on.
 
-    The intervention always reads from a *random-context* source: a sequence that carries
-    the edited window the counterfactual needs and resamples everything else from the
-    attested-bigram chain, so no context can leak through the source.
+    DAS additionally reads a *random-context* source: a sequence that carries the edited
+    window the counterfactual needs and resamples everything else from the attested-bigram
+    chain, so no context can leak through it. It is built only for methods that read one
+    (see ``build_loaders(needs_source=...)``), because requiring one drops examples.
     """
 
     dataset: str = "source-modified"
@@ -61,6 +64,8 @@ class DataConfig:
     check_repeat: bool = True        # keep only *generated* sequences the model still repeats
     check_cv_pattern: bool = False   # keep only edits whose consonant/vowel pattern is attested
     check_n_gram: int = 0            # 0 | 2 | 3 : require attested bi-/tri-grams after the edit
+    heldout_positions: tuple[int, ...] = ()  # edit positions kept out of train *and* val;
+                                     # test still edits every position (leave-one-position-out)
 
     def validate(self) -> None:
         if self.dataset not in DATASETS:
@@ -76,11 +81,33 @@ class DataConfig:
         # train on an empty intervention. Raise the floor to match rather than error out;
         # the effective value is what lands in the run name and the cache key.
         self.min_word_len = max(self.min_word_len, self.var_ngram)
+        # Grids and saved configs carry lists; the run name and the cache key are built from
+        # this sorted tuple, so [3, 1] and (1, 3) are one experiment, not two.
+        self.heldout_positions = tuple(sorted({int(p) for p in self.heldout_positions}))
+        if any(p < 0 for p in self.heldout_positions):
+            raise ValueError(f"heldout_positions must be >= 0, got {self.heldout_positions}")
+        if self.heldout_positions and self.dataset == "real-real":
+            raise ValueError("heldout_positions is implemented for the synthetic datasets "
+                             "(source-modified, modified-source) only, not real-real")
 
-    def cache_fields(self) -> dict[str, Any]:
+    def cache_fields(self, needs_source: bool = True) -> dict[str, Any]:
         """The subset of fields that change the dataset content (feeds the cache key).
-        Every field of this dataclass affects the produced examples, so all are keyed."""
-        return asdict(self)
+        Every field of this dataclass affects the produced examples, so all are keyed.
+
+        ``needs_source`` belongs to the method rather than the data, but it changes the
+        dataset: requiring a source drops every example no source survives the gate for,
+        so a run that skips it sees a different (larger) split and needs its own key.
+        Omitted when True, so caches written before the flag existed still hit.
+
+        ``heldout_positions`` is likewise omitted when empty: holding nothing out is the
+        dataset every existing cache already holds.
+        """
+        fields = asdict(self)
+        if not self.heldout_positions:
+            del fields["heldout_positions"]
+        if not needs_source:
+            fields["needs_source"] = False
+        return fields
 
     def filter_tokens(self) -> list[str]:
         """Compact tokens for the non-default content filters, shared by the run name and
@@ -103,6 +130,8 @@ class DataConfig:
             tokens.append(f"min{self.min_word_len}")
         if self.train_all_pos:
             tokens.append("allpos")
+        if self.heldout_positions:
+            tokens.append("hold" + "-".join(map(str, self.heldout_positions)))
         return tokens
 
 

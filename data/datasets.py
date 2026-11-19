@@ -28,6 +28,7 @@ import sys
 import time
 from ast import literal_eval
 from collections import defaultdict
+from collections.abc import Collection
 
 import numpy as np
 import torch
@@ -344,6 +345,7 @@ def build_synthetic(
     edit_ngram: int,
     source_maker: SourceMaker | None,
     min_word_len: int,
+    heldout_positions: Collection[int] = (),
     **edit_kwargs,
 ) -> list[dict[str, object]]:
     """Edit each word at one random position (or every position) and keep what survives.
@@ -351,13 +353,20 @@ def build_synthetic(
     ``role='source-modified'`` feeds the original and asks for the edited word;
     ``'modified-source'`` is the reverse. The source, when a method needs one, is built
     against the target; ``source_maker=None`` keeps every edit that survives its own gate.
+
+    ``heldout_positions`` are never edited. A word's random position is drawn from the
+    positions left over rather than the word being dropped, so holding a position out moves
+    those words' edits elsewhere instead of shrinking the split. With nothing held out the
+    draw is the original one, so existing caches stay valid.
     """
+    held = set(heldout_positions)
     examples: list[dict[str, object]] = []
     for seq in progress(usable_words(sequences, min_word_len), f"editing words ({role})"):
         n_starts = min(max_pos, len(seq) - edit_ngram + 1)
-        if n_starts <= 0:
+        starts = [p for p in range(n_starts) if p not in held]
+        if not starts:
             continue
-        positions = [int(rng.integers(0, n_starts))] if random_replace_pos else range(n_starts)
+        positions = [starts[int(rng.integers(0, len(starts)))]] if random_replace_pos else starts
         for pos in positions:
             edit = sample_edit(seq, pos, edit_ngram, rng=rng, **edit_kwargs)
             if edit is None:

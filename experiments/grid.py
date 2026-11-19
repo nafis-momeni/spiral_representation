@@ -56,6 +56,26 @@ def dedupe_configs(configs: list[ExperimentConfig]) -> list[ExperimentConfig]:
     return unique
 
 
+def expand_grid(grid: dict[str, list] | Path) -> list[ExperimentConfig]:
+    """The configs a grid trains: every combination, minus trivial ones, deduplicated.
+
+    ``seeds`` is the CV dimension, applied to every config rather than swept. This is the
+    expansion ``run_grid`` executes, so a reader that asks a config for its ``run_name``
+    finds exactly the directory the run was written to.
+    """
+    if isinstance(grid, (str, Path)):
+        grid = load_grid_from_json(grid)
+    grid = dict(grid)
+    seeds = grid.pop("seeds", None)
+    rows = list(grid_iter(grid))
+    if seeds is not None:
+        for row in rows:
+            row["seeds"] = seeds
+    configs = [ExperimentConfig.from_flat(row) for row in rows]
+    configs = [c for c in configs if not c.method.is_trivial()]  # random frozen embedding => nothing to learn
+    return dedupe_configs(configs)  # `from_flat` validates, which drops ignored fields
+
+
 def _run_one(
     cfg: ExperimentConfig, base_dir: Path, cache_dir: Path | None,
     device: torch.device | None, skip_existing: bool, save_model: bool, verbose: bool,
@@ -80,21 +100,9 @@ def run_grid(
     save_model: bool = False,
     verbose: bool = False,
 ) -> list[dict]:
-    if isinstance(grid, (str, Path)):
-        grid = load_grid_from_json(grid)
-    grid = dict(grid)
     base_dir = Path(base_dir)
     base_dir.mkdir(parents=True, exist_ok=True)
-
-    # `seeds` is the CV dimension, applied to every config -- not a swept axis.
-    seeds = grid.pop("seeds", None)
-    rows = list(grid_iter(grid))
-    if seeds is not None:
-        for row in rows:
-            row["seeds"] = seeds
-    configs = [ExperimentConfig.from_flat(row) for row in rows]
-    configs = [c for c in configs if not c.method.is_trivial()]  # random frozen embedding => nothing to learn
-    configs = dedupe_configs(configs)  # `from_flat` validates, which drops ignored fields
+    configs = expand_grid(grid)
     print(f"Grid: {len(configs)} configs x seeds, n_jobs={n_jobs}")
 
     if n_jobs == 1:

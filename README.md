@@ -41,6 +41,48 @@ That runs four independent steps, each skipped when its output already exists
 
 
 
+### Paper tables
+
+`plotting/paper_tables.ipynb` displays Tables 2 and 3; the runs behind them come from one
+command:
+
+```bash
+python -m intervention.tables --n_jobs 6
+```
+
+| table | what varies | seeds | cells |
+| --- | --- | --- | --- |
+| 2 | `das_auto` (k=1, k=2), `onion`, `spiral_rope` x `source-modified`, `modified-source` | 4 | 8 |
+| 3 | `spiral_rope` x CV-pattern filter x n-gram filter (none, 2, 3) | 2 | 6 |
+
+Grids are `table2_grid.json` and `table3_grid.json`. `k` is the DAS variable width, swept
+as `var_ngram`; a scale method ignores it, so onion and spiral collapse to one config per
+dataset rather than two. Each table trains into its own tree under `results/tables/`,
+because table 3's unfiltered row and table 2's source-modified spiral cell derive the same
+`run_name` and differ only in seed count. `--show` prints what is on disk without training,
+`--force` retrains, `--latex` emits the bodies.
+
+
+### Generalisation to unseen positions
+
+Onion and spiral compute `scale(position)` in closed form, so they return a scale at a
+position no training example used. The leave-one-position-out test trains each of them
+once per position p in 0–8 with edits at p removed from train *and* val (the test set
+still edits every position), plus once on every position as the reference:
+
+```bash
+python -m intervention.generalization --n_jobs 6                      # 2 models x 10 x 4 seeds
+python -m intervention.generalization --models spiral_rope --seeds 42 43 44 --n_jobs 5  # a subset
+python -m intervention.generalization --show --plot plots/generalization/loo.pdf
+```
+
+The number to read is the per-seed `gap` = accuracy at p trained without p − accuracy at
+p trained on every position; 0 means nothing was lost by never seeing p. The grid is
+`generalization_grid.json` (field `heldout_positions`), results go to
+`results/generalization/`, and per-seed rows to `loo_by_seed.csv`. A per-position lookup
+(`low_rank-*`, `per_pos`, DAS) is left out: its row for p never gets a gradient.
+
+
 ### Exploring
 
 Training and plotting are separate steps. Every command below is run from the repo root.

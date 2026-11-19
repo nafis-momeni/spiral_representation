@@ -1,0 +1,31 @@
+{
+  "_comment": "Leave-one-position-out: does scale(position) reach a position the intervention never trained on? Onion and spiral, source-modified. Each non-empty heldout_positions entry trains without edits at that position (train and val) and scores it on the full test set; [] is the same config trained on every position, the in-distribution reference -- and the same run as table 2's source-modified onion/spiral cells. Positions 0-8 are the ones the WFE test set edits. 2 models x 10 x 4 seeds = 80 runs. Expanded and executed by `python -m intervention.generalization`.",
+
+  "model_name": ["Ua_LSTM_h128_l1_v42_d0.0_t0.0_s1"],
+  "weights_path": ["resources/weights/1024_75.pth"],
+
+  "dataset": ["source-modified"],
+  "model": ["onion", "spiral_rope"],
+  "heldout_positions": [[], [0], [1], [2], [3], [4], [5], [6], [7], [8]],
+  "state_mode": ["concat"],
+  "embedding_init": ["delta_state_mean"],
+  "train_embedding": [true],
+  "seeds": [42, 43, 44, 45],
+
+  "edit_ngram": [1],
+  "edit_sampler": ["uniform"],
+  "check_repeat": [true],
+  "check_cv_pattern": [false],
+  "check_n_gram": [0],
+  "train_all_pos": [false],
+  "teacher_forcing": [false],
+
+  "learning_rate": [0.001],
+  "batch_size": [32],
+  "hidden_size": [128],
+  "num_epochs": [200],
+  "patience": [7],
+  "min_delta": [0.00001],
+  "max_seq_len": [20],
+  "val_ratio": [0.05]
+}

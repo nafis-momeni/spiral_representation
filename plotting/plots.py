@@ -31,6 +31,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from matplotlib.colors import to_rgb
 from matplotlib.figure import Figure
 from matplotlib.patches import Patch
 from sklearn.decomposition import PCA
@@ -52,7 +53,8 @@ DEFAULT_FEATURES = ["position", "Lexicality", "Size", "Morphology", "type-change
 
 __all__ = [
     "Run", "CVRun", "load_runs", "merge_predictions", "accuracy_table", "paper_style",
-    "norm_by_position", "similarity_histogram", "similarity_by_position",
+    "norm_by_position", "similarity_histogram", "similarity_violins",
+    "similarity_by_position",
     "position_similarity_matrix",
     "accuracy_by_position", "accuracy_bars", "scale_pca", "angle_by_position",
     "scale_norm_by_position",
@@ -320,6 +322,48 @@ def similarity_histogram(similarities: dict[str, np.ndarray],
     ax.set_ylabel("Count", fontsize=20, labelpad=8)
     ax.tick_params(axis="both", labelsize=15)
     ax.legend(fontsize=16, frameon=False)
+    sns.despine(ax=ax)
+    return _finish(fig, path)
+
+
+def _darken(color, factor: float = 0.6) -> tuple[float, float, float]:
+    """The same hue closer to black, for a mark drawn on its own violin."""
+    return tuple(factor * channel for channel in to_rgb(color))
+
+
+def similarity_violins(similarities: dict[str, np.ndarray],
+                       fig_size=(6, 5),
+                       path: Path | None = None) -> Figure:
+    """``similarity_histogram`` as violins, one per phoneme-category pair.
+
+    Takes the same dict and colours each pair as the histogram does, so the two figures
+    can sit side by side. Whiskers span the full range, the thick bar the interquartile
+    range and the dark line the median.
+    """
+    fig, ax = plt.subplots(figsize=fig_size)
+    palette = sns.color_palette("colorblind")
+    for index, ((label, values), color) in enumerate(zip(similarities.items(), palette)):
+        values = np.asarray(values)
+        parts = ax.violinplot(values, [index], widths=0.8, showmedians=True,
+                              showextrema=True)
+        parts["bodies"][0].set(facecolor=color, alpha=0.85, edgecolor="none")
+        for part in ("cbars", "cmins", "cmaxes"):
+            parts[part].set(color=color, linewidth=1, zorder=3)
+        parts["cmedians"].set(color="#2B2B2B", linewidth=1.4, zorder=5)
+        ax.vlines(index, *np.percentile(values, [25, 75]), color=_darken(color),
+                  linewidth=6, zorder=4)
+
+    low = min(np.min(v) for v in similarities.values())
+    high = max(np.max(v) for v in similarities.values())
+    margin = 0.05 * (high - low)
+    ax.set_ylim(low - margin, high + margin)
+    if low < 0 < high:
+        ax.axhline(0.0, color="#5A5A5A", linestyle="--", linewidth=1.0, zorder=1)
+    ax.set_xticks(range(len(similarities)), list(similarities))
+    ax.set_ylabel("Cosine similarity", fontsize=20, labelpad=8)
+    ax.tick_params(axis="both", labelsize=15)
+    ax.grid(axis="y", alpha=0.25, linewidth=0.6)
+    ax.set_axisbelow(True)
     sns.despine(ax=ax)
     return _finish(fig, path)
 

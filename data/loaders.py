@@ -12,6 +12,7 @@ import json
 import os
 import time
 from ast import literal_eval
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -173,9 +174,12 @@ def build_loaders(
 
     loaders: dict[str, DataLoader] = {}
     for split, frame in frames.items():
+        # Held-out positions leave train and val only: test is where they get scored, so it
+        # is built -- and keyed, and cached -- exactly as if nothing were held out.
+        split_cfg = replace(data_cfg, heldout_positions=()) if split == "test" else data_cfg
         # The cache key is the full data identity for this split (never batch_size).
-        key = {**data_cfg.cache_fields(needs_source), "seed": seed, "split": split}
-        tokens = data_cfg.filter_tokens() + ([] if needs_source else ["nosrc"])
+        key = {**split_cfg.cache_fields(needs_source), "seed": seed, "split": split}
+        tokens = split_cfg.filter_tokens() + ([] if needs_source else ["nosrc"])
         cache_path = _cache_path(cache_dir, data_cfg.dataset, split, key, tag="_".join(tokens))
 
         # Independent per-(seed, split) RNG -> each split reproducible and cacheable alone.
@@ -192,10 +196,11 @@ def build_loaders(
         else:
             sequences = [[phoneme_to_id[p] for p in s] for s in frame["No_Stress"]]
             random_replace_pos = (split == "train") and not data_cfg.train_all_pos
-            build_fn = lambda s=sequences, rp=random_replace_pos, r=split_rng, sm=source_maker: build_synthetic(
+            build_fn = lambda s=sequences, rp=random_replace_pos, r=split_rng, sm=source_maker, \
+                    held=split_cfg.heldout_positions: build_synthetic(
                 s, data_cfg.dataset, max_pos=max_position, random_replace_pos=rp, rng=r,
                 edit_ngram=data_cfg.edit_ngram, source_maker=sm,
-                min_word_len=data_cfg.min_word_len,
+                min_word_len=data_cfg.min_word_len, heldout_positions=held,
                 gate=gate, chain=chain, ngram_vocab=ngram_vocab,
                 ngram_list=list(ngram_vocab) if ngram_vocab else None,
                 vocab_size=len(phoneme_to_id), edit_sampler=data_cfg.edit_sampler,
