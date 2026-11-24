@@ -40,49 +40,6 @@ That runs four independent steps, each skipped when its output already exists
 - `surprisal` : `plots/surprisal/regression.csv` — predictability control 
 
 
-
-### Paper tables
-
-`plotting/paper_tables.ipynb` displays Tables 2 and 3; the runs behind them come from one
-command:
-
-```bash
-python -m intervention.tables --n_jobs 6
-```
-
-| table | what varies | seeds | cells |
-| --- | --- | --- | --- |
-| 2 | `das_auto` (k=1, k=2), `onion`, `spiral_rope` x `source-modified`, `modified-source` | 4 | 8 |
-| 3 | `spiral_rope` x CV-pattern filter x n-gram filter (none, 2, 3) | 2 | 6 |
-
-Grids are `table2_grid.json` and `table3_grid.json`. `k` is the DAS variable width, swept
-as `var_ngram`; a scale method ignores it, so onion and spiral collapse to one config per
-dataset rather than two. Each table trains into its own tree under `results/tables/`,
-because table 3's unfiltered row and table 2's source-modified spiral cell derive the same
-`run_name` and differ only in seed count. `--show` prints what is on disk without training,
-`--force` retrains, `--latex` emits the bodies.
-
-
-### Generalisation to unseen positions
-
-Onion and spiral compute `scale(position)` in closed form, so they return a scale at a
-position no training example used. The leave-one-position-out test trains each of them
-once per position p in 0–8 with edits at p removed from train *and* val (the test set
-still edits every position), plus once on every position as the reference:
-
-```bash
-python -m intervention.generalization --n_jobs 6                      # 2 models x 10 x 4 seeds
-python -m intervention.generalization --models spiral_rope --seeds 42 43 44 --n_jobs 5  # a subset
-python -m intervention.generalization --show --plot plots/generalization/loo.pdf
-```
-
-The number to read is the per-seed `gap` = accuracy at p trained without p − accuracy at
-p trained on every position; 0 means nothing was lost by never seeing p. The grid is
-`generalization_grid.json` (field `heldout_positions`), results go to
-`results/generalization/`, and per-seed rows to `loo_by_seed.csv`. A per-position lookup
-(`low_rank-*`, `per_pos`, DAS) is left out: its row for p never gets a gradient.
-
-
 ### Exploring
 
 Training and plotting are separate steps. Every command below is run from the repo root.
@@ -108,26 +65,36 @@ cross-validation, and plotting.
 | --- | --- |
 | `onion` | magnitude only, no rotation. `scale(p) = g · γ^p + p·β + b`, per dimension. This is the onion hypothesis. |
 | `spiral_rope` | exponential-decay magnitude plus a RoPE-style rotation of the scale vector, with a learned frequency per plane of dimensions. This is the spiral hypothesis. |
-| `low_rank-r` | unconstrained baseline. `scale(p)` is a per-position coefficient vector over `r` learned basis directions (default `r = 4`). |
+| `low_rank-r` | unconstrained ceiling. `scale(p)` is a per-position coefficient vector over `r` learned basis directions (default `r = 4`). |
 | `das` | distributed alignment search. Rotate the state, swap the edited position's fixed block, rotate back. |
 | `das_auto` | same, but every channel *learns* which variable it belongs to (or none), so variable sizes are learned rather than fixed. `params.npz` reports `var_sizes`, the channel count per variable. |
 
 Also available as scale parameterisations: `per_pos`, `one_scale`, `linear`, `expo_decay`,
 `expo_unbounded`, `plane_spiral`, `spiral_expo`, `spiral_lie`.
 
+### Generalisation to unseen positions
+
+Onion and spiral compute `scale(position)` in closed form, so they return a scale at a
+position no training example used. The leave-one-position-out test trains each of them
+once per position p in 0–8 with edits at p removed from train and val (the test set
+still edits every position), plus once on every position as the reference:
+
+```bash
+python -m intervention.generalization --n_jobs 6                      
+python -m intervention.generalization --models spiral_rope --seeds 42 43 44 --n_jobs 5  # a subset
+python -m intervention.generalization --show --plot plots/generalization/loo.pdf
+```
+
 ## Config
 
 Grids are a flat `{key: [values]}` JSON, and every combination becomes one
 `ExperimentConfig`. Key fields are `dataset` (real-real | source-modified |
-modified-source), `model`, `state_mode`, `embedding_init`, `train_embedding`, and `seeds`
-(the CV dimension, a list applied to every config rather than a swept axis). Unknown keys
-raise.
+modified-source), `model`, `state_mode`, `embedding_init`, `train_embedding`, and `seeds`.
 
 ## Resources
 
 `resources/` holds every input the pipeline needs, so nothing is resolved against the
-working directory or a parent repository. Reach it through `intervention.paths`, never by
-building a relative path.
+working directory or a parent repository. Reach it through `intervention.paths`.
 
 ```
 weights/      1024_75.pth                     the frozen repeat model checkpoint
@@ -136,10 +103,5 @@ datasets/     training.csv                    real words the sequences are drawn
               phonemes.csv                    per-phoneme articulatory features
               wfe[_with_repetition].csv       held-out word/non-word evaluation frame
 embeddings/   phoneme_state_embeddings.npz    token-state statistics for `delta_*` inits
-              ngram{2,3}_state_embeddings.npz same over n-grams
 ```
 
-The shipped files *are* the input. A missing file raises instead of silently rebuilding
-from the parent SWP project's grapheme-to-phoneme stack, which is not a dependency here.
-`embeddings/*.npz` is regenerated with `python -m intervention.data.delta_embeddings`
-(needs `states_ds/`).
